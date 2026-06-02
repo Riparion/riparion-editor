@@ -950,17 +950,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92773504d58c093f6de2459af4af33faa518c13451eb8f2b5698ed3d36e7c813"
 
 [[package]]
-name = "dx-dnd"
-version = "0.1.0"
-source = "git+https://github.com/Riparion/dx-dnd#8ef3b66a33c9432e15805476b18e88a3aaf99256"
-dependencies = [
- "dioxus",
- "dioxus-web",
- "wasm-bindgen",
- "web-sys",
-]
-
-[[package]]
 name = "encoding_rs"
 version = "0.8.35"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2223,13 +2212,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "riparion-dnd"
+version = "0.1.0"
+source = "git+https://github.com/Riparion/riparion-dnd#a6f13731e364b234c8c43bcf8a1df03dd80bd6ea"
+dependencies = [
+ "dioxus",
+ "dioxus-web",
+ "wasm-bindgen",
+ "web-sys",
+]
+
+[[package]]
 name = "riparion-editor"
 version = "0.1.0"
 dependencies = [
  "dioxus",
  "dioxus-web",
- "dx-dnd",
  "pulldown-cmark",
+ "riparion-dnd",
  "wasm-bindgen",
  "web-sys",
 ]

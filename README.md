@@ -17,7 +17,7 @@ typical use, but the crate is **renderer-agnostic** — you inject the renderer.
   `is_atomic`); the crate pins no markdown dialect, sanitizer, or embed syntax.
 - **Lossless block model** — `split_blocks` / `join_blocks` round-trip the source
   byte-for-byte (respecting fenced code and atomic lines).
-- **Drag-to-reorder** blocks (via [`dx-dnd`](https://github.com/Riparion/dx-dnd)).
+- **Drag-to-reorder** blocks (via [`riparion-dnd`](https://github.com/Riparion/riparion-dnd)).
 - **Keyboard editing** (web): double-Enter starts a new block with the caret in
   it; cross-block arrow navigation (column-preserving); selection formatting —
   type `*` `_` `` ` `` `~` to wrap, plus `Cmd/Ctrl+B` / `+I` / `+K` (link).
@@ -64,7 +64,7 @@ directly.
 ## Features flag
 
 Enable `web` for the browser build — it pulls in `web-sys` / `wasm-bindgen` for
-the caret/selection mechanics (and turns on `dx-dnd/web`):
+the caret/selection mechanics (and turns on `riparion-dnd/web`):
 
 ```toml
 [dependencies]

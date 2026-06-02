@@ -46,6 +46,6 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # The browser build: enables web-sys caret/selection + dx-dnd's web drag.
+      # The browser build: enables web-sys caret/selection + riparion-dnd's web drag.
       - name: cargo clippy (web)
         run: cargo clippy --no-default-features --features web --target wasm32-unknown-unknown -- -D warnings

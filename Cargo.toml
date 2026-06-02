@@ -11,8 +11,8 @@ readme = "README.md"
 default = []
 # Web build: pulls the `web-sys` bindings used to read the textarea caret
 # (selectionStart) so double-Enter can split a block at the cursor, and turns on
-# dx-dnd's web drag mechanics. On non-web builds these compile out.
-web = ["dioxus/web", "dep:dioxus-web", "dep:web-sys", "dep:wasm-bindgen", "dx-dnd/web"]
+# riparion-dnd's web drag mechanics. On non-web builds these compile out.
+web = ["dioxus/web", "dep:dioxus-web", "dep:web-sys", "dep:wasm-bindgen", "riparion-dnd/web"]
 
 [dependencies]
 # No platform features here (the consuming app turns on `dioxus/web` etc.; Cargo
@@ -21,9 +21,9 @@ web = ["dioxus/web", "dep:dioxus-web", "dep:web-sys", "dep:wasm-bindgen", "dx-dn
 dioxus = "0.7.9"
 
 # Drag-and-drop block reordering. Riparion's own HTML5 native-drag primitives;
-# Cargo.lock pins the exact commit (bump with `cargo update -p dx-dnd`). Its
-# web-sys drag mechanics are behind `dx-dnd/web`, enabled by our `web` feature.
-dx-dnd = { git = "https://github.com/Riparion/dx-dnd", package = "dx-dnd" }
+# Cargo.lock pins the exact commit (bump with `cargo update -p riparion-dnd`). Its
+# web-sys drag mechanics are behind `riparion-dnd/web`, enabled by our `web` feature.
+riparion-dnd = { git = "https://github.com/Riparion/riparion-dnd", package = "riparion-dnd" }
 
 # Web-only: reading the textarea caret needs wasm-bindgen / web-sys. All gated
 # behind the `web` feature so server/desktop builds stay clean.

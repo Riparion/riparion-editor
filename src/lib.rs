@@ -16,7 +16,7 @@
 //! so the host application reuses its own rendering pipeline unchanged.
 
 use dioxus::prelude::*;
-use dx_dnd::{DragDropArea, DragDropEvent, Draggable, DropList, DEFAULT_STYLE};
+use riparion_dnd::{DragDropArea, DragDropEvent, Draggable, DropList, DEFAULT_STYLE};
 
 /// One contiguous slice of the source document.
 ///
@@ -382,7 +382,7 @@ pub fn BlockEditor(
         frozen.set(snap);
     });
 
-    // Drag-and-drop block reordering, via the dx-dnd primitives. The drop event
+    // Drag-and-drop block reordering, via the riparion-dnd primitives. The drop event
     // carries source/target slots; we move the block and rejoin with canonical
     // separators (reorder is a structural edit, so spacing is normalized).
     let on_drop = use_callback(move |evt: DragDropEvent<usize>| {
@@ -621,8 +621,8 @@ pub fn BlockEditor(
     let arranging = active().is_none();
 
     rsx! {
-        // dx-dnd's drop-zone / handle styling, plus a scoped override so idle
-        // drop slivers stay slim (dx-dnd's default 10px reintroduces big gaps).
+        // riparion-dnd's drop-zone / handle styling, plus a scoped override so idle
+        // drop slivers stay slim (riparion-dnd's default 10px reintroduces big gaps).
         document::Stylesheet { href: DEFAULT_STYLE }
         style {
             ".riparion-editor .dnd-dz{{height:3px}}
@@ -773,7 +773,7 @@ pub fn BlockEditor(
 /// start editing. A separate component so Dioxus memoizes it on `text`/`class` —
 /// while one block is being edited (or another dragged), unchanged rows don't
 /// re-run their (possibly expensive) markdown render. Used both as a plain row in
-/// edit mode and as the child of a `dx_dnd::Draggable` card in arrange mode.
+/// edit mode and as the child of a `riparion_dnd::Draggable` card in arrange mode.
 #[component]
 fn RenderedContent(
     text: String,
