@@ -172,11 +172,27 @@ pub fn normalize_body(md: &str, is_atomic: impl Fn(&str) -> bool) -> String {
     rejoin_normalized(&split_blocks(md, is_atomic))
 }
 
-/// Read `(value, caret_byte_offset)` from the textarea that fired key event `e`,
-/// translating the browser's UTF-16 `selectionStart` into a Rust byte index so
-/// slicing the value is correct for multi-byte text. `None` off the web target.
+/// Convert a UTF-16 code-unit index (what the browser reports for textarea
+/// selection) into a Rust byte index, so slicing the value is correct for
+/// multi-byte text. Clamps to the string length.
 #[cfg(feature = "web")]
-fn textarea_caret(e: &KeyboardEvent) -> Option<(String, usize)> {
+fn utf16_to_byte(s: &str, utf16_idx: usize) -> usize {
+    let mut units = 0usize;
+    for (byte, ch) in s.char_indices() {
+        if units >= utf16_idx {
+            return byte;
+        }
+        units += ch.len_utf16();
+    }
+    s.len()
+}
+
+/// The textarea that fired key event `e`, plus its value and current selection
+/// (`selectionStart`/`selectionEnd`, in UTF-16 code units). `None` off web.
+#[cfg(feature = "web")]
+fn textarea_state(
+    e: &KeyboardEvent,
+) -> Option<(web_sys::HtmlTextAreaElement, String, usize, usize)> {
     use dioxus::web::WebEventExt;
     use wasm_bindgen::JsCast;
     let we: web_sys::KeyboardEvent = e.data().try_as_web_event()?;
@@ -185,16 +201,17 @@ fn textarea_caret(e: &KeyboardEvent) -> Option<(String, usize)> {
         .dyn_into::<web_sys::HtmlTextAreaElement>()
         .ok()?;
     let value = ta.value();
-    let caret16 = ta.selection_start().ok().flatten()? as usize;
-    let mut units = 0usize;
-    for (byte, ch) in value.char_indices() {
-        if units >= caret16 {
-            return Some((value, byte));
-        }
-        units += ch.len_utf16();
-    }
-    let len = value.len();
-    Some((value, len))
+    let start = ta.selection_start().ok().flatten()? as usize;
+    let end = ta.selection_end().ok().flatten()? as usize;
+    Some((ta, value, start, end))
+}
+
+/// Read `(value, caret_byte_offset)` from the textarea that fired key event `e`.
+#[cfg(feature = "web")]
+fn textarea_caret(e: &KeyboardEvent) -> Option<(String, usize)> {
+    let (_, value, start, _) = textarea_state(e)?;
+    let byte = utf16_to_byte(&value, start);
+    Some((value, byte))
 }
 
 /// The block-swap live-preview editor.
@@ -329,7 +346,7 @@ pub fn BlockEditor(
                                 item_id: i,
                                 list_id: "blocks".to_string(),
                                 slot: i,
-                                class: format!("flex items-start gap-2 {block_class}"),
+                                class: format!("flex items-center gap-2 {block_class}"),
                                 RenderedContent {
                                     text: blk.text.clone(),
                                     class: "flex-1".to_string(),
@@ -435,6 +452,104 @@ pub fn BlockEditor(
                                             // not deactivate us — we're moving focus.
                                             moving.set(true);
                                             active.set(Some(i + 1));
+                                        }
+                                    }
+                                } else {
+                                    // Inline formatting on the current selection. No JS —
+                                    // just web-sys to read/replace the textarea selection:
+                                    //   * `_` ` ~   (typed)  wrap the selection (press twice
+                                    //               for bold/strike); only with a selection.
+                                    //   Cmd/Ctrl+B / +I       bold / italic (works empty too).
+                                    //   Cmd/Ctrl+K            wrap as a [text](url) link.
+                                    #[cfg(feature = "web")]
+                                    {
+                                        let mods = e.modifiers();
+                                        let cmd = mods.contains(Modifiers::CONTROL)
+                                            || mods.contains(Modifiers::META);
+                                        let alt = mods.contains(Modifiers::ALT);
+                                        // (open, close, is_link, require_selection)
+                                        let spec: Option<(String, String, bool, bool)> =
+                                            match e.key() {
+                                                Key::Character(c) if cmd && !alt => {
+                                                    match c.to_lowercase().as_str() {
+                                                        "b" => Some((
+                                                            "**".into(),
+                                                            "**".into(),
+                                                            false,
+                                                            false,
+                                                        )),
+                                                        "i" => Some((
+                                                            "*".into(),
+                                                            "*".into(),
+                                                            false,
+                                                            false,
+                                                        )),
+                                                        "k" => Some((
+                                                            "[".into(),
+                                                            "](url)".into(),
+                                                            true,
+                                                            false,
+                                                        )),
+                                                        _ => None,
+                                                    }
+                                                }
+                                                Key::Character(c)
+                                                    if !cmd
+                                                        && !alt
+                                                        && matches!(
+                                                            c.as_str(),
+                                                            "*" | "_" | "`" | "~"
+                                                        ) =>
+                                                {
+                                                    Some((c.clone(), c.clone(), false, true))
+                                                }
+                                                _ => None,
+                                            };
+                                        if let Some((open, close, is_link, require_sel)) = spec
+                                        {
+                                            if let Some((ta, value, start, end)) =
+                                                textarea_state(&e)
+                                            {
+                                                if !require_sel || start != end {
+                                                    e.prevent_default();
+                                                    let bs = utf16_to_byte(&value, start);
+                                                    let be = utf16_to_byte(&value, end);
+                                                    let new = format!(
+                                                        "{}{open}{}{close}{}",
+                                                        &value[..bs],
+                                                        &value[bs..be],
+                                                        &value[be..],
+                                                    );
+                                                    let open16 =
+                                                        open.encode_utf16().count() as u32;
+                                                    // New selection / caret (UTF-16):
+                                                    let (ns, ne) = if is_link {
+                                                        // Select the "url" placeholder so the
+                                                        // user types the URL over it.
+                                                        let u = end as u32 + open16 + 2;
+                                                        (u, u + 3)
+                                                    } else if start == end {
+                                                        // Empty: caret between the markers.
+                                                        (start as u32 + open16, start as u32 + open16)
+                                                    } else {
+                                                        // Keep the selection on the inner text
+                                                        // so a repeat press wraps again.
+                                                        (start as u32 + open16, end as u32 + open16)
+                                                    };
+                                                    // Set the DOM value first so the controlled
+                                                    // re-render writes an identical string (no
+                                                    // caret reset), then restore the selection.
+                                                    ta.set_value(&new);
+                                                    let _ = ta.set_selection_range(ns, ne);
+                                                    {
+                                                        let mut f = frozen.write();
+                                                        if i < f.len() {
+                                                            f[i].text = new;
+                                                        }
+                                                    }
+                                                    body.set(join_blocks(&frozen.read()));
+                                                }
+                                            }
                                         }
                                     }
                                 }
