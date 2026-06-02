@@ -92,6 +92,11 @@ fn render_block(src: String) -> Element {
         return rsx! { div { class: "embed", "🔗 {label}" } };
     }
 
+    // SECURITY: this demo renders the parser's HTML verbatim via
+    // `dangerous_inner_html`, and `Options::all()` keeps raw inline HTML in the
+    // output. That is fine for a local demo over trusted, self-authored content,
+    // but it is an XSS vector for any untrusted input. A real app should run the
+    // HTML through a sanitizer (e.g. `ammonia`) before injecting it.
     let mut out = String::new();
     let parser = Parser::new_ext(&src, Options::all());
     html::push_html(&mut out, parser);

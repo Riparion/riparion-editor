@@ -97,14 +97,20 @@ pub fn split_blocks(md: &str, is_atomic: impl Fn(&str) -> bool) -> Vec<Block> {
             continue;
         }
 
-        if let Some(open) = open_fence(content) {
-            if closed {
-                flush(&mut cur, &mut blocks);
-                closed = false;
+        // Only open a fence at a block boundary — the start of the document or
+        // right after a blank line. A ``` that appears mid-paragraph (no preceding
+        // blank line) is treated as ordinary text rather than swallowing the rest
+        // of the block as code.
+        if closed || cur.is_empty() {
+            if let Some(open) = open_fence(content) {
+                if closed {
+                    flush(&mut cur, &mut blocks);
+                    closed = false;
+                }
+                cur.push_str(line);
+                fence = Some(open);
+                continue;
             }
-            cur.push_str(line);
-            fence = Some(open);
-            continue;
         }
 
         if is_atomic(content) {
@@ -130,7 +136,20 @@ pub fn split_blocks(md: &str, is_atomic: impl Fn(&str) -> bool) -> Vec<Block> {
 }
 
 /// If `content` opens a code fence, return its fence char and run length.
+///
+/// Follows CommonMark's indentation rule: a fence opener may be indented at most
+/// three spaces. Four or more spaces (or a leading tab) make the line an *indented*
+/// code block instead, so it is not treated as a fence.
 fn open_fence(content: &str) -> Option<(char, usize)> {
+    // Leading-whitespace width: a tab counts as four columns, a space as one.
+    let indent: usize = content
+        .chars()
+        .take_while(|c| c.is_whitespace())
+        .map(|c| if c == '\t' { 4 } else { 1 })
+        .sum();
+    if indent >= 4 {
+        return None;
+    }
     let t = content.trim_start();
     let ch = t.chars().next()?;
     if ch != '`' && ch != '~' {
@@ -170,6 +189,37 @@ pub fn rejoin_normalized(blocks: &[Block]) -> String {
 /// a body after a structural edit.
 pub fn normalize_body(md: &str, is_atomic: impl Fn(&str) -> bool) -> String {
     rejoin_normalized(&split_blocks(md, is_atomic))
+}
+
+/// Ensure `s` ends with a paragraph break (a blank line) so whatever follows it
+/// starts its own paragraph. No-op when `s` is empty or already blank-terminated.
+fn ensure_paragraph_break(s: &mut String) {
+    if !s.is_empty() && !s.ends_with("\n\n") {
+        if s.ends_with('\n') {
+            s.push('\n');
+        } else {
+            s.push_str("\n\n");
+        }
+    }
+}
+
+/// Stable, content-derived render keys for a block list, so Dioxus diffs blocks by
+/// identity rather than position — index keys make it reuse the wrong DOM node when
+/// blocks are reordered or inserted. Identical-content blocks are disambiguated by
+/// their occurrence order; every key contains a `#`, so callers can mint a
+/// collision-free constant key (e.g. for the active textarea) by omitting one.
+fn block_keys(blocks: &[Block]) -> Vec<String> {
+    use std::collections::HashMap;
+    let mut seen: HashMap<&str, usize> = HashMap::new();
+    blocks
+        .iter()
+        .map(|b| {
+            let n = seen.entry(b.text.as_str()).or_insert(0);
+            let key = format!("{}#{n}", b.text);
+            *n += 1;
+            key
+        })
+        .collect()
 }
 
 /// Convert a UTF-16 code-unit index (what the browser reports for textarea
@@ -231,6 +281,23 @@ fn textarea_caret(e: &KeyboardEvent) -> Option<(String, usize)> {
     Some((value, byte))
 }
 
+/// An inline-format action resolved from a key press: wrap the current selection
+/// (or caret) with `open`…`close`. Replaces the old positional
+/// `(String, String, bool, bool)` tuple so each field reads at the call site.
+#[cfg(feature = "web")]
+struct WrapSpec {
+    /// Text inserted before the selection (e.g. `**`, `[`).
+    open: String,
+    /// Text inserted after the selection (e.g. `**`, `](url)`).
+    close: String,
+    /// After wrapping, select the `url` placeholder inside `close` (link insert)
+    /// instead of keeping the selection on the wrapped text.
+    select_url: bool,
+    /// Only act when there is a non-empty selection. Typed `* _ ~ \`` require one;
+    /// the Cmd/Ctrl shortcuts also fire on an empty caret.
+    require_selection: bool,
+}
+
 /// The block-swap live-preview editor.
 ///
 /// `body` is the single source of truth (canonical markdown); the editor splices
@@ -288,20 +355,20 @@ pub fn BlockEditor(
     // empty block isn't produced by `split_blocks`, so we build the snapshot by
     // hand and render from it until the next blur re-splits.
     let add_block = use_callback(move |_: ()| {
-        let mut snap = split_blocks(&body(), atomic);
+        // While a block is active, the frozen snapshot — not a fresh re-split of
+        // body() — is the source of truth (H1). Re-splitting could fragment the
+        // active block on its own internal blank lines and drop the new block in
+        // the wrong place.
+        let mut snap = match active() {
+            Some(_) => frozen(),
+            None => split_blocks(&body(), atomic),
+        };
         let at = match active() {
             Some(i) => (i + 1).min(snap.len()),
             None => snap.len(),
         };
         if at > 0 {
-            let prev = &mut snap[at - 1].text;
-            if !prev.is_empty() && !prev.ends_with("\n\n") {
-                if prev.ends_with('\n') {
-                    prev.push('\n');
-                } else {
-                    prev.push_str("\n\n");
-                }
-            }
+            ensure_paragraph_break(&mut snap[at - 1].text);
         }
         snap.insert(
             at,
@@ -335,6 +402,210 @@ pub fn BlockEditor(
         body.set(rejoin_normalized(&bs));
     });
 
+    // Write block `i`'s new text into the frozen snapshot and resync `body` from
+    // it. The single edit-while-active commit path (D2): used by typing into the
+    // textarea and by the inline-format shortcuts.
+    let mut commit_block = move |i: usize, text: String| {
+        {
+            let mut f = frozen.write();
+            if let Some(b) = f.get_mut(i) {
+                b.text = text;
+            }
+        }
+        body.set(join_blocks(&frozen.read()));
+    };
+
+    // The big per-key behavior, split out of the textarea's `onkeydown` (K1) into
+    // one closure per concern. All three are web-only: they read the live caret /
+    // selection, which the server never does interactively.
+
+    // Double-Enter (Notion-style): a plain Enter on a blank line ends this block and
+    // opens a fresh one below, moving the caret to its start. A single Enter still
+    // inserts a newline, so lists/code type normally.
+    #[cfg(feature = "web")]
+    let mut handle_enter = move |i: usize, e: &KeyboardEvent| {
+        let Some((value, caret)) = textarea_caret(e) else {
+            return;
+        };
+        let line_start = value[..caret].rfind('\n').map(|n| n + 1).unwrap_or(0);
+        let line_end = value[caret..]
+            .find('\n')
+            .map(|n| caret + n)
+            .unwrap_or(value.len());
+        if !value[line_start..line_end].trim().is_empty() {
+            return; // Not a blank line — let the browser insert a newline.
+        }
+        e.prevent_default();
+        // Head keeps everything up to the blank line and ends in a paragraph break;
+        // the rest becomes a new block the caret enters.
+        let mut head = value[..line_start].to_string();
+        ensure_paragraph_break(&mut head);
+        let tail = value[line_end..]
+            .strip_prefix('\n')
+            .unwrap_or(&value[line_end..])
+            .to_string();
+        {
+            let mut f = frozen.write();
+            if i < f.len() {
+                f[i].text = head;
+                f.insert(
+                    i + 1,
+                    Block {
+                        text: tail,
+                        atomic: false,
+                    },
+                );
+            }
+        }
+        body.set(join_blocks(&frozen.read()));
+        // The blur from removing this textarea must not deactivate us — we're
+        // moving focus into the new block, caret at its start (L2).
+        moving.set(true);
+        pending_caret.set(Some(0));
+        active.set(Some(i + 1));
+    };
+
+    // Cross-block arrow nav: Up/Left off the top/start of a block move into the
+    // previous one, Down/Right off the bottom/end into the next — preserving the
+    // caret column. Mid-block, the browser's default applies.
+    #[cfg(feature = "web")]
+    let mut handle_arrow_nav = move |i: usize, e: &KeyboardEvent| {
+        let Some((value, caret)) = textarea_caret(e) else {
+            return;
+        };
+        let len = value.len();
+        let key = e.key();
+        let line_start = value[..caret].rfind('\n').map(|n| n + 1).unwrap_or(0);
+        let column = value[line_start..caret].chars().count();
+        let on_first_line = !value[..caret].contains('\n');
+        let on_last_line = !value[caret..].contains('\n');
+        let go_prev =
+            (key == Key::ArrowUp && on_first_line) || (key == Key::ArrowLeft && caret == 0);
+        let go_next =
+            (key == Key::ArrowDown && on_last_line) || (key == Key::ArrowRight && caret == len);
+        let n = frozen.read().len();
+        let target = if go_prev && i > 0 {
+            Some(i - 1)
+        } else if go_next && i + 1 < n {
+            Some(i + 1)
+        } else {
+            None
+        };
+        let Some(t_idx) = target else {
+            return;
+        };
+        e.prevent_default();
+        let pos = {
+            let f = frozen.read();
+            let t = &f[t_idx].text;
+            let target_byte = match key {
+                // Same column on the prev block's last line.
+                Key::ArrowUp => {
+                    let ls = t.rfind('\n').map(|x| x + 1).unwrap_or(0);
+                    ls + col_to_byte(&t[ls..], column)
+                }
+                // Same column on the next block's first line.
+                Key::ArrowDown => {
+                    let le = t.find('\n').unwrap_or(t.len());
+                    col_to_byte(&t[..le], column)
+                }
+                // Left: end of the previous block.
+                Key::ArrowLeft => t.len(),
+                // Right: start of the next block.
+                _ => 0,
+            };
+            byte_to_utf16(t, target_byte)
+        };
+        // Skip the blur-deactivate (we're moving focus), then move and place the
+        // caret on mount.
+        moving.set(true);
+        pending_caret.set(Some(pos));
+        active.set(Some(t_idx));
+    };
+
+    // Inline formatting on the current selection. No JS — just web-sys to
+    // read/replace the textarea selection:
+    //   * `_` ` ~  (typed)  wrap the selection (press twice for bold/strike); only
+    //              with a selection.
+    //   Cmd/Ctrl+B / +I      bold / italic (works empty too).
+    //   Cmd/Ctrl+K           wrap as a [text](url) link.
+    #[cfg(feature = "web")]
+    let mut handle_inline_format = move |i: usize, e: &KeyboardEvent| {
+        let mods = e.modifiers();
+        let cmd = mods.contains(Modifiers::CONTROL) || mods.contains(Modifiers::META);
+        let alt = mods.contains(Modifiers::ALT);
+        let spec: Option<WrapSpec> = match e.key() {
+            Key::Character(c) if cmd && !alt => match c.to_lowercase().as_str() {
+                "b" => Some(WrapSpec {
+                    open: "**".into(),
+                    close: "**".into(),
+                    select_url: false,
+                    require_selection: false,
+                }),
+                "i" => Some(WrapSpec {
+                    open: "*".into(),
+                    close: "*".into(),
+                    select_url: false,
+                    require_selection: false,
+                }),
+                "k" => Some(WrapSpec {
+                    open: "[".into(),
+                    close: "](url)".into(),
+                    select_url: true,
+                    require_selection: false,
+                }),
+                _ => None,
+            },
+            Key::Character(c) if !cmd && !alt && matches!(c.as_str(), "*" | "_" | "`" | "~") => {
+                Some(WrapSpec {
+                    open: c.clone(),
+                    close: c.clone(),
+                    select_url: false,
+                    require_selection: true,
+                })
+            }
+            _ => None,
+        };
+        let Some(spec) = spec else {
+            return;
+        };
+        let Some((ta, value, start, end)) = textarea_state(e) else {
+            return;
+        };
+        if spec.require_selection && start == end {
+            return;
+        }
+        e.prevent_default();
+        let bs = utf16_to_byte(&value, start);
+        let be = utf16_to_byte(&value, end);
+        let new = format!(
+            "{}{}{}{}{}",
+            &value[..bs],
+            spec.open,
+            &value[bs..be],
+            spec.close,
+            &value[be..],
+        );
+        let open16 = spec.open.encode_utf16().count() as u32;
+        // New selection / caret (UTF-16):
+        let (ns, ne) = if spec.select_url {
+            // Select the "url" placeholder so the user types the URL over it.
+            let u = end as u32 + open16 + 2;
+            (u, u + 3)
+        } else if start == end {
+            // Empty: caret between the markers.
+            (start as u32 + open16, start as u32 + open16)
+        } else {
+            // Keep the selection on the inner text so a repeat press wraps again.
+            (start as u32 + open16, end as u32 + open16)
+        };
+        // Set the DOM value first so the controlled re-render writes an identical
+        // string (no caret reset), then restore the selection.
+        ta.set_value(&new);
+        let _ = ta.set_selection_range(ns, ne);
+        commit_block(i, new);
+    };
+
     // While editing, render the frozen snapshot (stable indices); otherwise the
     // live re-split. Drag-to-reorder is enabled only when not editing a block.
     let view = if active().is_some() {
@@ -342,6 +613,11 @@ pub fn BlockEditor(
     } else {
         blocks()
     };
+    // Content-derived render keys so reorder / insert reuses the right DOM node (L3).
+    let keys = block_keys(&view);
+    // Constant key for the active textarea: contains no `#`, so it never collides
+    // with a `block_keys` entry, and stays put as the textarea's content mutates.
+    let active_key = "active-textarea";
     let arranging = active().is_none();
 
     rsx! {
@@ -364,7 +640,7 @@ pub fn BlockEditor(
                         count: view.len(),
                         for (i , blk) in view.iter().enumerate() {
                             Draggable::<usize> {
-                                key: "{i}",
+                                key: "{keys[i]}",
                                 item_id: i,
                                 list_id: "blocks".to_string(),
                                 slot: i,
@@ -385,7 +661,10 @@ pub fn BlockEditor(
                 for (i , blk) in view.iter().enumerate() {
                     if active() == Some(i) {
                         textarea {
-                            key: "{i}",
+                            // A constant key (no `#`, so it can't collide with a
+                            // `block_keys` entry): keeps the textarea from remounting
+                            // — and losing focus — as its content changes on input.
+                            key: "{active_key}",
                             class: "{textarea_class}",
                             // Grow to fit: one row per line (+1 of slack), min 2. Keeps
                             // a long block from scrolling inside a short fixed box.
@@ -417,13 +696,7 @@ pub fn BlockEditor(
                                 });
                             },
                             oninput: move |e: FormEvent| {
-                                {
-                                    let mut f = frozen.write();
-                                    if let Some(b) = f.get_mut(i) {
-                                        b.text = e.value();
-                                    }
-                                }
-                                body.set(join_blocks(&frozen.read()));
+                                commit_block(i, e.value());
                             },
                             // Leaving the block normalizes spacing so any structural
                             // edit (insert / split) leaves blocks cleanly separated.
@@ -438,236 +711,36 @@ pub fn BlockEditor(
                                 }
                             },
                             onkeydown: move |e: KeyboardEvent| {
-                                // Double-Enter (Notion-style): a plain Enter pressed on
-                                // a blank line ends this block and opens a fresh one
-                                // below, moving the caret into it — fingers stay on the
-                                // keyboard. A single Enter still inserts a newline, so
-                                // lists/code type normally; Shift/Ctrl/Cmd+Enter alone.
+                                // Esc renders the block again (works on every target).
+                                // The caret-aware behaviors live in the extracted
+                                // web-only handlers (K1): double-Enter to split,
+                                // arrow nav across blocks, inline-format shortcuts.
                                 if e.key() == Key::Escape {
                                     active.set(None);
                                     body.set(normalize_body(&body(), atomic));
-                                } else if e.key() == Key::Enter && e.modifiers().is_empty()
-                                {
-                                    // Needs the live caret position; web-only (the
-                                    // server never runs this interactively).
-                                    #[cfg(feature = "web")]
-                                    if let Some((value, caret)) = textarea_caret(&e) {
-                                        let line_start = value[..caret]
-                                            .rfind('\n')
-                                            .map(|n| n + 1)
-                                            .unwrap_or(0);
-                                        let line_end = value[caret..]
-                                            .find('\n')
-                                            .map(|n| caret + n)
-                                            .unwrap_or(value.len());
-                                        if value[line_start..line_end].trim().is_empty() {
-                                            e.prevent_default();
-                                            // Head keeps everything up to the blank line
-                                            // and ends in a blank-line separator; the
-                                            // rest becomes a new block the caret enters.
-                                            let mut head = value[..line_start].to_string();
-                                            if !head.is_empty() && !head.ends_with("\n\n") {
-                                                if head.ends_with('\n') {
-                                                    head.push('\n');
-                                                } else {
-                                                    head.push_str("\n\n");
-                                                }
-                                            }
-                                            let tail = value[line_end..]
-                                                .strip_prefix('\n')
-                                                .unwrap_or(&value[line_end..])
-                                                .to_string();
-                                            {
-                                                let mut f = frozen.write();
-                                                if i < f.len() {
-                                                    f[i].text = head;
-                                                    f.insert(
-                                                        i + 1,
-                                                        Block { text: tail, atomic: false },
-                                                    );
-                                                }
-                                            }
-                                            body.set(join_blocks(&frozen.read()));
-                                            // The blur from removing this textarea must
-                                            // not deactivate us — we're moving focus.
-                                            moving.set(true);
-                                            active.set(Some(i + 1));
-                                        }
-                                    }
-                                } else if e.modifiers().is_empty()
-                                    && matches!(
-                                        e.key(),
-                                        Key::ArrowUp
-                                            | Key::ArrowDown
-                                            | Key::ArrowLeft
-                                            | Key::ArrowRight
-                                    )
-                                {
-                                    // Cross-block arrow nav: Up/Left off the top/start of
-                                    // a block move into the previous one, Down/Right off
-                                    // the bottom/end into the next — preserving the caret
-                                    // column. Mid-block, the browser's default applies.
-                                    #[cfg(feature = "web")]
-                                    if let Some((value, caret)) = textarea_caret(&e) {
-                                        let len = value.len();
-                                        let key = e.key();
-                                        let line_start = value[..caret]
-                                            .rfind('\n')
-                                            .map(|n| n + 1)
-                                            .unwrap_or(0);
-                                        let column = value[line_start..caret].chars().count();
-                                        let on_first_line = !value[..caret].contains('\n');
-                                        let on_last_line = !value[caret..].contains('\n');
-                                        let go_prev = (key == Key::ArrowUp && on_first_line)
-                                            || (key == Key::ArrowLeft && caret == 0);
-                                        let go_next = (key == Key::ArrowDown && on_last_line)
-                                            || (key == Key::ArrowRight && caret == len);
-                                        let n = frozen.read().len();
-                                        let target = if go_prev && i > 0 {
-                                            Some(i - 1)
-                                        } else if go_next && i + 1 < n {
-                                            Some(i + 1)
-                                        } else {
-                                            None
-                                        };
-                                        if let Some(t_idx) = target {
-                                            e.prevent_default();
-                                            let pos = {
-                                                let f = frozen.read();
-                                                let t = &f[t_idx].text;
-                                                let target_byte = match key {
-                                                    // Same column on the prev block's last line.
-                                                    Key::ArrowUp => {
-                                                        let ls = t
-                                                            .rfind('\n')
-                                                            .map(|x| x + 1)
-                                                            .unwrap_or(0);
-                                                        ls + col_to_byte(&t[ls..], column)
-                                                    }
-                                                    // Same column on the next block's first line.
-                                                    Key::ArrowDown => {
-                                                        let le =
-                                                            t.find('\n').unwrap_or(t.len());
-                                                        col_to_byte(&t[..le], column)
-                                                    }
-                                                    // Left: end of the previous block.
-                                                    Key::ArrowLeft => t.len(),
-                                                    // Right: start of the next block.
-                                                    _ => 0,
-                                                };
-                                                byte_to_utf16(t, target_byte)
-                                            };
-                                            // Skip the blur-deactivate (we're moving focus),
-                                            // then move and place the caret on mount.
-                                            moving.set(true);
-                                            pending_caret.set(Some(pos));
-                                            active.set(Some(t_idx));
-                                        }
-                                    }
                                 } else {
-                                    // Inline formatting on the current selection. No JS —
-                                    // just web-sys to read/replace the textarea selection:
-                                    //   * `_` ` ~   (typed)  wrap the selection (press twice
-                                    //               for bold/strike); only with a selection.
-                                    //   Cmd/Ctrl+B / +I       bold / italic (works empty too).
-                                    //   Cmd/Ctrl+K            wrap as a [text](url) link.
                                     #[cfg(feature = "web")]
+                                    if e.key() == Key::Enter && e.modifiers().is_empty() {
+                                        handle_enter(i, &e);
+                                    } else if e.modifiers().is_empty()
+                                        && matches!(
+                                            e.key(),
+                                            Key::ArrowUp
+                                                | Key::ArrowDown
+                                                | Key::ArrowLeft
+                                                | Key::ArrowRight
+                                        )
                                     {
-                                        let mods = e.modifiers();
-                                        let cmd = mods.contains(Modifiers::CONTROL)
-                                            || mods.contains(Modifiers::META);
-                                        let alt = mods.contains(Modifiers::ALT);
-                                        // (open, close, is_link, require_selection)
-                                        let spec: Option<(String, String, bool, bool)> =
-                                            match e.key() {
-                                                Key::Character(c) if cmd && !alt => {
-                                                    match c.to_lowercase().as_str() {
-                                                        "b" => Some((
-                                                            "**".into(),
-                                                            "**".into(),
-                                                            false,
-                                                            false,
-                                                        )),
-                                                        "i" => Some((
-                                                            "*".into(),
-                                                            "*".into(),
-                                                            false,
-                                                            false,
-                                                        )),
-                                                        "k" => Some((
-                                                            "[".into(),
-                                                            "](url)".into(),
-                                                            true,
-                                                            false,
-                                                        )),
-                                                        _ => None,
-                                                    }
-                                                }
-                                                Key::Character(c)
-                                                    if !cmd
-                                                        && !alt
-                                                        && matches!(
-                                                            c.as_str(),
-                                                            "*" | "_" | "`" | "~"
-                                                        ) =>
-                                                {
-                                                    Some((c.clone(), c.clone(), false, true))
-                                                }
-                                                _ => None,
-                                            };
-                                        if let Some((open, close, is_link, require_sel)) = spec
-                                        {
-                                            if let Some((ta, value, start, end)) =
-                                                textarea_state(&e)
-                                            {
-                                                if !require_sel || start != end {
-                                                    e.prevent_default();
-                                                    let bs = utf16_to_byte(&value, start);
-                                                    let be = utf16_to_byte(&value, end);
-                                                    let new = format!(
-                                                        "{}{open}{}{close}{}",
-                                                        &value[..bs],
-                                                        &value[bs..be],
-                                                        &value[be..],
-                                                    );
-                                                    let open16 =
-                                                        open.encode_utf16().count() as u32;
-                                                    // New selection / caret (UTF-16):
-                                                    let (ns, ne) = if is_link {
-                                                        // Select the "url" placeholder so the
-                                                        // user types the URL over it.
-                                                        let u = end as u32 + open16 + 2;
-                                                        (u, u + 3)
-                                                    } else if start == end {
-                                                        // Empty: caret between the markers.
-                                                        (start as u32 + open16, start as u32 + open16)
-                                                    } else {
-                                                        // Keep the selection on the inner text
-                                                        // so a repeat press wraps again.
-                                                        (start as u32 + open16, end as u32 + open16)
-                                                    };
-                                                    // Set the DOM value first so the controlled
-                                                    // re-render writes an identical string (no
-                                                    // caret reset), then restore the selection.
-                                                    ta.set_value(&new);
-                                                    let _ = ta.set_selection_range(ns, ne);
-                                                    {
-                                                        let mut f = frozen.write();
-                                                        if i < f.len() {
-                                                            f[i].text = new;
-                                                        }
-                                                    }
-                                                    body.set(join_blocks(&frozen.read()));
-                                                }
-                                            }
-                                        }
+                                        handle_arrow_nav(i, &e);
+                                    } else {
+                                        handle_inline_format(i, &e);
                                     }
                                 }
                             },
                         }
                     } else {
                         RenderedContent {
-                            key: "{i}",
+                            key: "{keys[i]}",
                             text: blk.text.clone(),
                             class: block_class.clone(),
                             render_block,
@@ -805,6 +878,38 @@ mod tests {
             normalize_body("L1\nL2\n\nP2\n", no_atomic),
             "L1\nL2\n\nP2\n"
         );
+    }
+
+    #[test]
+    fn indented_4_spaces_is_not_a_fence() {
+        // CommonMark: 4-space indentation makes it an indented code block, not a
+        // fence — the run must not swallow following lines as code.
+        assert_eq!(open_fence("    ```"), None);
+        assert_eq!(open_fence("\t```"), None);
+        // Up to 3 spaces still opens a fence.
+        assert_eq!(open_fence("   ```"), Some(('`', 3)));
+        // No fence opens, so the indented ``` and the prose after it stay one
+        // ordinary block rather than the prose being swallowed as code.
+        let s = "    ```\nstill prose\n";
+        let blocks = split_blocks(s, no_atomic);
+        assert_eq!(join_blocks(&blocks), s);
+        assert_eq!(blocks.len(), 1);
+    }
+
+    #[test]
+    fn fence_midparagraph_without_blank_line_is_not_recognized() {
+        // A ``` directly after a prose line (no blank between) must not start a
+        // fence and swallow the rest of the document.
+        let s = "some prose\n```\nnot really code\n";
+        let blocks = split_blocks(s, no_atomic);
+        assert_eq!(join_blocks(&blocks), s);
+        // One block, no open fence left dangling.
+        assert_eq!(blocks.len(), 1);
+        // A fence DOES open after a blank line, though.
+        let s2 = "some prose\n\n```\ncode\n```\n";
+        let blocks2 = split_blocks(s2, no_atomic);
+        assert_eq!(join_blocks(&blocks2), s2);
+        assert!(blocks2.iter().any(|b| b.text.contains("```\ncode\n```")));
     }
 
     #[test]
