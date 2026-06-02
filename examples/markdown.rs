@@ -14,7 +14,38 @@
 
 use dioxus::prelude::*;
 use pulldown_cmark::{html, Options, Parser};
-use riparion_editor::BlockEditor;
+use riparion_editor::{BlockEditor, CompletionItem};
+
+/// The demo's smart-tag catalog. A real app injects its own; here a couple of
+/// fixed entries show the `[[/` autocomplete working.
+fn completions(query: String) -> Vec<CompletionItem> {
+    let q = query.to_lowercase();
+    [
+        (
+            "embed",
+            "Embed",
+            "A standalone atomic line.",
+            "[[embed: …]]",
+        ),
+        ("note", "Note", "A callout block.", "[[/note text=\"…\"]]"),
+        (
+            "chart",
+            "Chart",
+            "An inline bar chart.",
+            "[[/chart data=\"3,7,2,9\"]]",
+        ),
+    ]
+    .into_iter()
+    .filter(|(name, label, _, _)| {
+        q.is_empty() || name.contains(&q) || label.to_lowercase().contains(&q)
+    })
+    .map(|(_, label, detail, insert)| CompletionItem {
+        label: label.to_string(),
+        detail: detail.to_string(),
+        insert: insert.to_string(),
+    })
+    .collect()
+}
 
 /// Seed document, exercising headings, lists, a fenced code block, and an
 /// atomic `[[embed]]` line.
@@ -57,6 +88,11 @@ body { margin: 0; background: #f6f7f9; color: #1a1a1a;
 .editor-textarea { width: 100%; box-sizing: border-box; padding: 0.4rem 0.5rem;
     border: 1px solid #c7ccd3; border-radius: 0.4rem; background: #fff;
     font-family: ui-monospace, SFMono-Regular, monospace; font-size: 0.95rem; }
+.ac-menu { min-width: 18rem; background: #fff; border: 1px solid #c7ccd3;
+    border-radius: 0.5rem; box-shadow: 0 8px 24px rgba(0,0,0,0.12); padding: 0.25rem; }
+.ac-item { padding: 0.35rem 0.6rem; border-radius: 0.35rem; }
+.ac-item:hover { background: #eceef1; }
+.ac-item-active { background: #e3effe; }
 "#;
 
 fn main() {
@@ -78,6 +114,11 @@ fn app() -> Element {
                 })),
                 block_class: "prose".to_string(),
                 textarea_class: "editor-textarea".to_string(),
+                // Type `[[/` in any block to open the autocomplete popup.
+                complete: Callback::new(completions),
+                completion_menu_class: "ac-menu".to_string(),
+                completion_item_class: "ac-item".to_string(),
+                completion_item_active_class: "ac-item-active".to_string(),
             }
         }
     }
