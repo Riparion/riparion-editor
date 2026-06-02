@@ -34,6 +34,56 @@ fn completions(query: String) -> Vec<CompletionItem> {
             "An inline bar chart.",
             "[[/chart data=\"3,7,2,9\"]]",
         ),
+        (
+            "warning",
+            "Warning",
+            "A warning callout.",
+            "[[/warning text=\"…\"]]",
+        ),
+        (
+            "tip",
+            "Tip",
+            "A helpful tip callout.",
+            "[[/tip text=\"…\"]]",
+        ),
+        (
+            "table",
+            "Table",
+            "A data table.",
+            "[[/table cols=\"a,b,c\"]]",
+        ),
+        (
+            "image",
+            "Image",
+            "An inline image.",
+            "[[/image src=\"…\" alt=\"…\"]]",
+        ),
+        (
+            "video",
+            "Video",
+            "An embedded video.",
+            "[[/video src=\"…\"]]",
+        ),
+        (
+            "code",
+            "Code",
+            "A syntax-highlighted snippet.",
+            "[[/code lang=\"rust\"]]",
+        ),
+        ("math", "Math", "A LaTeX math block.", "[[/math tex=\"…\"]]"),
+        (
+            "quote",
+            "Quote",
+            "A block quotation.",
+            "[[/quote cite=\"…\"]]",
+        ),
+        (
+            "toc",
+            "Contents",
+            "A table of contents.",
+            "[[/toc depth=\"2\"]]",
+        ),
+        ("divider", "Divider", "A horizontal rule.", "[[/divider]]"),
     ]
     .into_iter()
     .filter(|(name, label, _, _)| {

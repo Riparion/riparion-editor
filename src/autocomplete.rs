@@ -327,6 +327,30 @@ pub fn CompletionPopup(
     if items.is_empty() {
         return rsx! {};
     }
+    // Live element handles for each rendered row, keyed by the same `label` the
+    // rows are `key`ed on (an index map would go stale when the filter narrows:
+    // a surviving row keeps its DOM node and never re-fires `onmounted`, so its
+    // index in the map would point at the wrong — or a dropped — element).
+    let mut item_els: Signal<std::collections::HashMap<String, std::rc::Rc<MountedData>>> =
+        use_signal(std::collections::HashMap::new);
+
+    // When the highlight moves past the menu's visible edge, pull the selected
+    // row back into view. Keyed on `selected` *and* the current labels via
+    // `use_reactive!` because both arrive as plain props (reading a prop inside
+    // a bare `use_effect` does not subscribe it to re-runs).
+    let labels: Vec<String> = items.iter().map(|it| it.label.clone()).collect();
+    use_effect(use_reactive!(|(selected, labels)| {
+        if let Some(label) = selected.and_then(|i| labels.get(i)) {
+            if let Some(el) = item_els.read().get(label).cloned() {
+                spawn(async move {
+                    // `Instant`, not `Smooth`: smooth scrolling lags behind held
+                    // arrow keys and the highlight visibly trails the viewport.
+                    let _ = el.scroll_to(ScrollBehavior::Instant).await;
+                });
+            }
+        }
+    }));
+
     rsx! {
         div {
             // Self-contained positioning so the menu is usable with zero host
@@ -346,6 +370,12 @@ pub fn CompletionPopup(
                     "aria-selected": if Some(i) == selected { "true" } else { "false" },
                     class: if Some(i) == selected { format!("{item_class} {item_active_class}") } else { item_class.clone() },
                     style: "cursor:pointer;",
+                    onmounted: {
+                        let label = item.label.clone();
+                        move |e: MountedEvent| {
+                            item_els.write().insert(label.clone(), e.data());
+                        }
+                    },
                     // mousedown keeps focus on the textarea (a plain click would
                     // fire after its blur had torn the active editor down).
                     onmousedown: move |e: MouseEvent| {
