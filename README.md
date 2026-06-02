@@ -74,6 +74,19 @@ riparion-editor = { version = "0.1", features = ["web"] }
 Off the web target the keyboard/selection helpers compile out; the editor still
 renders and click-to-edit works.
 
+## Running the example
+
+[`examples/markdown.rs`](examples/markdown.rs) is a complete browser demo: it
+wires [`pulldown-cmark`](https://crates.io/crates/pulldown-cmark) into
+`render_block`, seeds a document, and treats `[[embed]]` lines as atomic blocks.
+Run it with the [Dioxus CLI](https://dioxuslabs.com/learn/0.7/CLI/):
+
+```sh
+dx serve --example markdown --features web
+```
+
+Then open the printed URL and click any block to edit its raw Markdown.
+
 ## License
 
 Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your
