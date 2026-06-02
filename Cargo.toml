@@ -2,7 +2,7 @@
 name = "riparion-editor"
 version = "0.1.0"
 edition = "2021"
-description = "A reusable pure-Dioxus block-swap live-preview markdown editor."
+description = "A block-swap live-preview editor for Dioxus: a document renders as styled blocks and the active block swaps to a raw textarea. Bring your own renderer (Markdown by default); drag-to-reorder."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/tonybierman/riparion-cms"
 

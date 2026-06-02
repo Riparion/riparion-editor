@@ -1,4 +1,4 @@
-//! A reusable, pure-Dioxus **block-swap live-preview** markdown editor.
+//! A reusable **block-swap live-preview** editor for Dioxus (Markdown by default).
 //!
 //! The document is shown as a column of styled markdown *blocks*. The block the
 //! user is editing turns into a raw-markdown `<textarea>`; clicking away (or
