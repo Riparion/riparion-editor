@@ -18,6 +18,12 @@
 use dioxus::prelude::*;
 use riparion_dnd::{DragDropArea, DragDropEvent, Draggable, DropList, DEFAULT_STYLE};
 
+mod autocomplete;
+pub use autocomplete::{
+    apply_completion, find_trigger, use_autocomplete, Autocomplete, CompletionItem,
+    CompletionPopup, KeyOutcome, TriggerMatch,
+};
+
 /// One contiguous slice of the source document.
 ///
 /// **Invariant:** concatenating every block's [`text`](Block::text) in document
@@ -317,8 +323,24 @@ pub fn BlockEditor(
     /// Class for the active-block `<textarea>`.
     #[props(default)]
     textarea_class: String,
+    /// Optional inline-autocomplete provider: given the query typed after `[[/`,
+    /// return the candidates to offer. `None` (the default) disables
+    /// autocomplete entirely — fully back-compatible. See [`use_autocomplete`].
+    #[props(default)]
+    complete: Option<Callback<String, Vec<CompletionItem>>>,
+    /// Class for the autocomplete menu container (see [`CompletionPopup`]).
+    #[props(default)]
+    completion_menu_class: String,
+    /// Class for each autocomplete item row.
+    #[props(default)]
+    completion_item_class: String,
+    /// Class added to the highlighted autocomplete item.
+    #[props(default)]
+    completion_item_active_class: String,
 ) -> Element {
     let mut body = body;
+    // The single autocomplete behavior source, shared with any host textarea.
+    let ac = use_autocomplete(complete);
     // Index of the block currently being edited as raw markdown, if any.
     let mut active = use_signal(|| Option::<usize>::None);
     // Snapshot taken when a block is activated. While active we render from this
@@ -618,6 +640,9 @@ pub fn BlockEditor(
     // Constant key for the active textarea: contains no `#`, so it never collides
     // with a `block_keys` entry, and stays put as the textarea's content mutates.
     let active_key = "active-textarea";
+    // Constant key for the textarea's positioning wrapper — like `active_key`, it
+    // contains no `#` so it can't collide with a `block_keys` entry.
+    let active_wrapper_key = "active-wrapper";
     let arranging = active().is_none();
 
     rsx! {
@@ -660,6 +685,11 @@ pub fn BlockEditor(
                 // clickable rendered blocks (no drag handles while editing).
                 for (i , blk) in view.iter().enumerate() {
                     if active() == Some(i) {
+                        // Positioning context for the autocomplete popup, which
+                        // renders absolutely below the textarea.
+                        div {
+                            key: "{active_wrapper_key}",
+                            style: "position:relative;",
                         textarea {
                             // A constant key (no `#`, so it can't collide with a
                             // `block_keys` entry): keeps the textarea from remounting
@@ -697,6 +727,7 @@ pub fn BlockEditor(
                             },
                             oninput: move |e: FormEvent| {
                                 commit_block(i, e.value());
+                                ac.on_input(&e);
                             },
                             // Leaving the block normalizes spacing so any structural
                             // edit (insert / split) leaves blocks cleanly separated.
@@ -711,6 +742,17 @@ pub fn BlockEditor(
                                 }
                             },
                             onkeydown: move |e: KeyboardEvent| {
+                                // The autocomplete popup gets first refusal on keys,
+                                // so its ↑/↓/Enter/Tab/Esc don't also drive block
+                                // split / cross-block nav / deactivate below.
+                                match ac.on_keydown(&e) {
+                                    KeyOutcome::Accepted { value } => {
+                                        commit_block(i, value);
+                                        return;
+                                    }
+                                    KeyOutcome::Consumed => return,
+                                    KeyOutcome::Ignored => {}
+                                }
                                 // Esc renders the block again (works on every target).
                                 // The caret-aware behaviors live in the extracted
                                 // web-only handlers (K1): double-Enter to split,
@@ -737,6 +779,24 @@ pub fn BlockEditor(
                                     }
                                 }
                             },
+                        }
+                        if ac.open() {
+                            CompletionPopup {
+                                items: ac.items(),
+                                selected: ac.selected(),
+                                on_pick: move |idx: usize| {
+                                    #[cfg(feature = "web")]
+                                    if let Some(value) = ac.accept(idx) {
+                                        commit_block(i, value);
+                                    }
+                                    #[cfg(not(feature = "web"))]
+                                    let _ = idx;
+                                },
+                                menu_class: completion_menu_class.clone(),
+                                item_class: completion_item_class.clone(),
+                                item_active_class: completion_item_active_class.clone(),
+                            }
+                        }
                         }
                     } else {
                         RenderedContent {
