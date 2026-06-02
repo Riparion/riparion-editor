@@ -333,12 +333,19 @@ pub fn CompletionPopup(
             // CSS; colors/spacing come from `menu_class`.
             style: "position:absolute;left:0;top:100%;z-index:50;margin-top:0.25rem;max-height:18rem;overflow-y:auto;",
             class: "{menu_class}",
+            role: "listbox",
             for (i , item) in items.iter().enumerate() {
-                button {
+                // A `<div>` (not a `<button>`): a button carries native chrome that
+                // we'd have to neutralize with an inline `background`/`border`, and
+                // an inline `background` beats the host's `item_active_class`, so the
+                // selection highlight would never render. A div has no such chrome,
+                // so the host's classes (hover + active background) apply cleanly.
+                div {
                     key: "{item.label}",
-                    r#type: "button",
+                    role: "option",
+                    "aria-selected": if Some(i) == selected { "true" } else { "false" },
                     class: if Some(i) == selected { format!("{item_class} {item_active_class}") } else { item_class.clone() },
-                    style: "display:block;width:100%;text-align:left;cursor:pointer;font:inherit;color:inherit;background:transparent;border:0;",
+                    style: "cursor:pointer;",
                     // mousedown keeps focus on the textarea (a plain click would
                     // fire after its blur had torn the active editor down).
                     onmousedown: move |e: MouseEvent| {
