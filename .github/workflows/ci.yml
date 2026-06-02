@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  check:
+    name: fmt + clippy + test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt
+        run: cargo fmt --all -- --check
+
+      # Default (host) build: the lossless block model + round-trip unit tests.
+      # The web-only caret/selection/drag code compiles out here.
+      - name: cargo clippy
+        run: cargo clippy --no-default-features --all-targets -- -D warnings
+
+      - name: cargo test
+        run: cargo test --no-default-features
+
+  wasm:
+    name: wasm32 clippy (web feature)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      # The browser build: enables web-sys caret/selection + dx-dnd's web drag.
+      - name: cargo clippy (web)
+        run: cargo clippy --no-default-features --features web --target wasm32-unknown-unknown -- -D warnings
