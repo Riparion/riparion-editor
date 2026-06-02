@@ -42,3 +42,15 @@ features = [
     # caret when arrow-navigating into an adjacent block.
     "Element",
 ]
+
+[dev-dependencies]
+# Only the `markdown` example needs a concrete renderer; the crate itself pins
+# no markdown dialect.
+pulldown-cmark = { version = "0.12", default-features = false, features = ["html"] }
+
+# The runnable demo. Gated on `web` (it calls `dioxus::launch`, which needs a
+# renderer) so the default host build — and `cargo clippy --all-targets` — skips
+# it. Run with: `dx serve --example markdown --features web`.
+[[example]]
+name = "markdown"
+required-features = ["web"]
