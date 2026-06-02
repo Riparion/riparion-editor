@@ -187,6 +187,23 @@ fn utf16_to_byte(s: &str, utf16_idx: usize) -> usize {
     s.len()
 }
 
+/// Count UTF-16 code units in `s[..byte_idx]` (the inverse of [`utf16_to_byte`]),
+/// for setting a textarea selection — the browser addresses it in UTF-16.
+#[cfg(feature = "web")]
+fn byte_to_utf16(s: &str, byte_idx: usize) -> u32 {
+    s[..byte_idx].chars().map(|c| c.len_utf16() as u32).sum()
+}
+
+/// Byte offset of the `col`-th char within `line`, clamped to its end. Used to
+/// keep the caret's column when arrow-navigating between blocks.
+#[cfg(feature = "web")]
+fn col_to_byte(line: &str, col: usize) -> usize {
+    line.char_indices()
+        .nth(col)
+        .map(|(b, _)| b)
+        .unwrap_or(line.len())
+}
+
 /// The textarea that fired key event `e`, plus its value and current selection
 /// (`selectionStart`/`selectionEnd`, in UTF-16 code units). `None` off web.
 #[cfg(feature = "web")]
@@ -241,10 +258,15 @@ pub fn BlockEditor(
     // snapshot and never re-split, so the active index and the textarea's caret
     // stay stable no matter what the user types (including blank lines).
     let mut frozen = use_signal(Vec::<Block>::new);
-    // Set when we *programmatically* move focus to another block (double-Enter).
-    // Removing the old textarea fires a `blur`; without this guard that blur would
-    // immediately deactivate the editor and normalize away the new empty block.
+    // Set when we *programmatically* move focus to another block (double-Enter,
+    // arrow nav). Removing the old textarea fires a `blur`; without this guard that
+    // blur would immediately deactivate the editor and normalize away the new block.
     let mut moving = use_signal(|| false);
+    // Caret offset (UTF-16) to apply once the next-activated block's textarea
+    // mounts — lets cross-block arrow nav land the caret at the right column.
+    // Web-only: it's read/written solely from the web-gated key + mount handlers.
+    #[cfg(feature = "web")]
+    let mut pending_caret = use_signal(|| Option::<u32>::None);
 
     let atomic = move |line: &str| match is_atomic {
         Some(cb) => cb.call(line.to_string()),
@@ -374,6 +396,24 @@ pub fn BlockEditor(
                             onmounted: move |e: MountedEvent| {
                                 spawn(async move {
                                     let _ = e.set_focus(true).await;
+                                    // Place the caret where arrow nav asked (after
+                                    // focus, which would otherwise land it at the end).
+                                    #[cfg(feature = "web")]
+                                    {
+                                        let mut pc = pending_caret;
+                                        if let Some(pos) = pc() {
+                                            pc.set(None);
+                                            use dioxus::web::WebEventExt;
+                                            use wasm_bindgen::JsCast;
+                                            if let Some(el) = e.data().try_as_web_event() {
+                                                if let Ok(ta) = el
+                                                    .dyn_into::<web_sys::HtmlTextAreaElement>()
+                                                {
+                                                    let _ = ta.set_selection_range(pos, pos);
+                                                }
+                                            }
+                                        }
+                                    }
                                 });
                             },
                             oninput: move |e: FormEvent| {
@@ -452,6 +492,76 @@ pub fn BlockEditor(
                                             // not deactivate us — we're moving focus.
                                             moving.set(true);
                                             active.set(Some(i + 1));
+                                        }
+                                    }
+                                } else if e.modifiers().is_empty()
+                                    && matches!(
+                                        e.key(),
+                                        Key::ArrowUp
+                                            | Key::ArrowDown
+                                            | Key::ArrowLeft
+                                            | Key::ArrowRight
+                                    )
+                                {
+                                    // Cross-block arrow nav: Up/Left off the top/start of
+                                    // a block move into the previous one, Down/Right off
+                                    // the bottom/end into the next — preserving the caret
+                                    // column. Mid-block, the browser's default applies.
+                                    #[cfg(feature = "web")]
+                                    if let Some((value, caret)) = textarea_caret(&e) {
+                                        let len = value.len();
+                                        let key = e.key();
+                                        let line_start = value[..caret]
+                                            .rfind('\n')
+                                            .map(|n| n + 1)
+                                            .unwrap_or(0);
+                                        let column = value[line_start..caret].chars().count();
+                                        let on_first_line = !value[..caret].contains('\n');
+                                        let on_last_line = !value[caret..].contains('\n');
+                                        let go_prev = (key == Key::ArrowUp && on_first_line)
+                                            || (key == Key::ArrowLeft && caret == 0);
+                                        let go_next = (key == Key::ArrowDown && on_last_line)
+                                            || (key == Key::ArrowRight && caret == len);
+                                        let n = frozen.read().len();
+                                        let target = if go_prev && i > 0 {
+                                            Some(i - 1)
+                                        } else if go_next && i + 1 < n {
+                                            Some(i + 1)
+                                        } else {
+                                            None
+                                        };
+                                        if let Some(t_idx) = target {
+                                            e.prevent_default();
+                                            let pos = {
+                                                let f = frozen.read();
+                                                let t = &f[t_idx].text;
+                                                let target_byte = match key {
+                                                    // Same column on the prev block's last line.
+                                                    Key::ArrowUp => {
+                                                        let ls = t
+                                                            .rfind('\n')
+                                                            .map(|x| x + 1)
+                                                            .unwrap_or(0);
+                                                        ls + col_to_byte(&t[ls..], column)
+                                                    }
+                                                    // Same column on the next block's first line.
+                                                    Key::ArrowDown => {
+                                                        let le =
+                                                            t.find('\n').unwrap_or(t.len());
+                                                        col_to_byte(&t[..le], column)
+                                                    }
+                                                    // Left: end of the previous block.
+                                                    Key::ArrowLeft => t.len(),
+                                                    // Right: start of the next block.
+                                                    _ => 0,
+                                                };
+                                                byte_to_utf16(t, target_byte)
+                                            };
+                                            // Skip the blur-deactivate (we're moving focus),
+                                            // then move and place the caret on mount.
+                                            moving.set(true);
+                                            pending_caret.set(Some(pos));
+                                            active.set(Some(t_idx));
                                         }
                                     }
                                 } else {

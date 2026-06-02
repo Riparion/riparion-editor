@@ -32,4 +32,12 @@ wasm-bindgen = { version = "0.2", optional = true }
 [dependencies.web-sys]
 version = "0.3"
 optional = true
-features = ["Event", "EventTarget", "KeyboardEvent", "HtmlTextAreaElement"]
+features = [
+    "Event",
+    "EventTarget",
+    "KeyboardEvent",
+    "HtmlTextAreaElement",
+    # `Element` is the mounted-event web type we cast to a textarea to place the
+    # caret when arrow-navigating into an adjacent block.
+    "Element",
+]
