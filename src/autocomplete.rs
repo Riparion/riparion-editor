@@ -114,7 +114,9 @@ pub struct Autocomplete {
     complete: Option<Callback<String, Vec<CompletionItem>>>,
     open: Signal<bool>,
     items: Signal<Vec<CompletionItem>>,
-    selected: Signal<usize>,
+    /// Highlighted index, or `None` when the popup is open but the caret is
+    /// still "in the text" — the first ↓/↑ moves the selection *into* the list.
+    selected: Signal<Option<usize>>,
     /// The textarea element, captured on `oninput`, so a popup *click* (whose
     /// event target is the menu, not the textarea) can still splice into it.
     #[cfg(feature = "web")]
@@ -130,8 +132,9 @@ impl Autocomplete {
     pub fn items(&self) -> Vec<CompletionItem> {
         (self.items)()
     }
-    /// The highlighted index into [`items`](Self::items).
-    pub fn selected(&self) -> usize {
+    /// The highlighted index into [`items`](Self::items), or `None` while the
+    /// caret is still in the text (before the first ↓/↑ enters the list).
+    pub fn selected(&self) -> Option<usize> {
         (self.selected)()
     }
 
@@ -141,7 +144,7 @@ impl Autocomplete {
     fn dismiss(mut self) {
         self.open.set(false);
         self.items.set(Vec::new());
-        self.selected.set(0);
+        self.selected.set(None);
     }
 
     /// Detect/refresh the trigger after the textarea's value changed. Call from
@@ -168,7 +171,9 @@ impl Autocomplete {
                         let mut sel = self.selected;
                         let mut op = self.open;
                         its.set(items);
-                        sel.set(0);
+                        // Open with nothing highlighted: the first ↓/↑ enters the
+                        // list. Re-filtering (typing) likewise resets to "in text".
+                        sel.set(None);
                         op.set(true);
                     }
                 }
@@ -189,32 +194,45 @@ impl Autocomplete {
                 return KeyOutcome::Ignored;
             }
             let len = (self.items)().len();
+            if len == 0 {
+                return KeyOutcome::Ignored;
+            }
             let mut sel = self.selected;
             match e.key() {
+                // ↓/↑ move *into* the list (first press) then navigate it. While
+                // open they always belong to the popup, never the textarea caret.
                 Key::ArrowDown => {
                     e.prevent_default();
-                    if len > 0 {
-                        sel.set((sel() + 1) % len);
-                    }
+                    sel.set(Some(match sel() {
+                        None => 0,
+                        Some(i) => (i + 1) % len,
+                    }));
                     KeyOutcome::Consumed
                 }
                 Key::ArrowUp => {
                     e.prevent_default();
-                    if len > 0 {
-                        sel.set((sel() + len - 1) % len);
-                    }
+                    sel.set(Some(match sel() {
+                        None => len - 1,
+                        Some(i) => (i + len - 1) % len,
+                    }));
                     KeyOutcome::Consumed
                 }
-                Key::Enter | Key::Tab => {
-                    e.prevent_default();
-                    match self.accept(sel()) {
-                        Some(value) => KeyOutcome::Accepted { value },
-                        None => {
-                            self.dismiss();
-                            KeyOutcome::Consumed
+                // Enter/Tab accept *only* once an item is selected; with nothing
+                // selected they fall through (a normal newline / tab in the text).
+                Key::Enter | Key::Tab => match sel() {
+                    Some(i) => {
+                        e.prevent_default();
+                        match self.accept(i) {
+                            Some(value) => KeyOutcome::Accepted { value },
+                            None => {
+                                self.dismiss();
+                                KeyOutcome::Consumed
+                            }
                         }
                     }
-                }
+                    None => KeyOutcome::Ignored,
+                },
+                // Esc closes the menu with no insert; editing resumes as normal.
                 Key::Escape => {
                     e.prevent_default();
                     self.dismiss();
@@ -263,7 +281,7 @@ pub fn use_autocomplete(complete: Option<Callback<String, Vec<CompletionItem>>>)
         complete,
         open: use_signal(|| false),
         items: use_signal(Vec::new),
-        selected: use_signal(|| 0usize),
+        selected: use_signal(|| None),
         #[cfg(feature = "web")]
         el: use_signal(|| None),
     }
@@ -292,7 +310,8 @@ fn formevent_textarea(e: &FormEvent) -> Option<(web_sys::HtmlTextAreaElement, St
 #[component]
 pub fn CompletionPopup(
     items: Vec<CompletionItem>,
-    selected: usize,
+    /// The highlighted item, or `None` when no item is selected yet.
+    selected: Option<usize>,
     on_pick: EventHandler<usize>,
     #[props(default)] on_hover: Option<EventHandler<usize>>,
     /// Class for the menu container.
@@ -318,7 +337,7 @@ pub fn CompletionPopup(
                 button {
                     key: "{item.label}",
                     r#type: "button",
-                    class: if i == selected { format!("{item_class} {item_active_class}") } else { item_class.clone() },
+                    class: if Some(i) == selected { format!("{item_class} {item_active_class}") } else { item_class.clone() },
                     style: "display:block;width:100%;text-align:left;cursor:pointer;font:inherit;color:inherit;background:transparent;border:0;",
                     // mousedown keeps focus on the textarea (a plain click would
                     // fire after its blur had torn the active editor down).
