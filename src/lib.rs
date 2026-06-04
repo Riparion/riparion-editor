@@ -209,6 +209,42 @@ fn ensure_paragraph_break(s: &mut String) {
     }
 }
 
+/// Remove block `i` and return the normalized body (the [`rejoin_normalized`]
+/// form). Out-of-range `i` is a no-op. The pure core of [`BlockChrome::delete`].
+pub fn delete_and_normalize(blocks: &[Block], i: usize) -> String {
+    let mut v = blocks.to_vec();
+    if i < v.len() {
+        v.remove(i);
+    }
+    rejoin_normalized(&v)
+}
+
+/// Insert `text` immediately after block `i` and return the normalized body.
+/// The text is re-split with [`split_blocks`], so a multi-paragraph paste
+/// becomes proper separate blocks; whitespace-only text is dropped by
+/// normalization. The pure core of [`BlockChrome::insert_after`].
+pub fn insert_after_and_normalize(
+    blocks: &[Block],
+    i: usize,
+    text: &str,
+    is_atomic: impl Fn(&str) -> bool,
+) -> String {
+    let mut v = blocks.to_vec();
+    let at = (i + 1).min(v.len());
+    if at > 0 {
+        ensure_paragraph_break(&mut v[at - 1].text);
+    }
+    // Whitespace-only pieces are blank separators, not content — skip them
+    // (`rejoin_normalized` only drops fully-empty blocks, not indented ones).
+    let inserted = split_blocks(text, is_atomic)
+        .into_iter()
+        .filter(|b| !b.text.trim().is_empty());
+    for (k, b) in inserted.enumerate() {
+        v.insert(at + k, b);
+    }
+    rejoin_normalized(&v)
+}
+
 /// Stable, content-derived render keys for a block list, so Dioxus diffs blocks by
 /// identity rather than position — index keys make it reuse the wrong DOM node when
 /// blocks are reordered or inserted. Identical-content blocks are disambiguated by
@@ -304,6 +340,26 @@ struct WrapSpec {
     require_selection: bool,
 }
 
+/// Per-block chrome handed to a host's `wrap_block` callback so it can wrap an
+/// inactive, rendered block in app-specific UI (e.g. a right-click context
+/// menu). The crate stays widget-free: it exposes only the block's identity,
+/// its source, the already-rendered child, and the structural ops to act on it.
+#[derive(Clone)]
+pub struct BlockChrome {
+    /// This block's position in the current view (0-based).
+    pub index: usize,
+    /// This block's exact markdown source (the same string `render_block` saw).
+    pub text: String,
+    /// The rendered, clickable block content to wrap. The returned Element must
+    /// include it, or the block disappears.
+    pub children: Element,
+    /// Delete block `i` (pass [`BlockChrome::index`]).
+    pub delete: Callback<usize>,
+    /// Insert `text` as new block(s) immediately after block `i`
+    /// (pass `(index, text)`). Multi-paragraph text becomes multiple blocks.
+    pub insert_after: Callback<(usize, String)>,
+}
+
 /// The block-swap live-preview editor.
 ///
 /// `body` is the single source of truth (canonical markdown); the editor splices
@@ -337,6 +393,14 @@ pub fn BlockEditor(
     /// Class added to the highlighted autocomplete item.
     #[props(default)]
     completion_item_active_class: String,
+    /// Optional per-block wrapper: given a [`BlockChrome`] (block index, source,
+    /// the rendered child, and structural-op callbacks), return the Element to
+    /// render in that block's place — e.g. wrap it in a right-click context
+    /// menu. Applies to inactive, rendered blocks only (never the active
+    /// textarea). `None` (the default) renders blocks bare — fully
+    /// back-compatible.
+    #[props(default)]
+    wrap_block: Option<Callback<BlockChrome, Element>>,
 ) -> Element {
     let mut body = body;
     // The single autocomplete behavior source, shared with any host textarea.
@@ -403,6 +467,85 @@ pub fn BlockEditor(
         body.set(join_blocks(&snap));
         frozen.set(snap);
     });
+
+    // Delete block `i` (exposed to the host through [`BlockChrome`]). Like
+    // `add_block`, while a block is active the frozen snapshot — not a fresh
+    // re-split — is the source of truth (H1), so we mutate it and keep `body`
+    // in sync with `join_blocks`; normalize-on-blur canonicalizes spacing
+    // later. When idle, this is a structural edit like `on_drop`: re-split and
+    // rejoin normalized.
+    let delete_block = use_callback(move |i: usize| {
+        if active().is_some() {
+            let mut snap = frozen();
+            if i >= snap.len() {
+                return;
+            }
+            snap.remove(i);
+            // Removing a block before the active one shifts it left. The active
+            // block itself is never wrapped, but handle it defensively.
+            match active() {
+                Some(a) if a == i => active.set(None),
+                Some(a) if a > i => active.set(Some(a - 1)),
+                _ => {}
+            }
+            body.set(join_blocks(&snap));
+            frozen.set(snap);
+        } else {
+            let bs = split_blocks(&body(), atomic);
+            if i >= bs.len() {
+                return;
+            }
+            body.set(delete_and_normalize(&bs, i));
+        }
+    });
+
+    // Insert `text` as new block(s) right below block `i` (exposed to the host
+    // through [`BlockChrome`] — the "paste" op). Same frozen-vs-resplit duality
+    // as `delete_block`. The text is re-split so a multi-paragraph paste lands
+    // as proper separate blocks.
+    let insert_block_after = use_callback(move |(i, text): (usize, String)| {
+        if active().is_some() {
+            let mut snap = frozen();
+            let at = (i + 1).min(snap.len());
+            if at > 0 {
+                ensure_paragraph_break(&mut snap[at - 1].text);
+            }
+            let mut inserted = split_blocks(&text, atomic);
+            // Keep the pasted block(s) separated from whatever follows.
+            if let Some(last) = inserted.last_mut() {
+                ensure_paragraph_break(&mut last.text);
+            }
+            let n = inserted.len();
+            for (k, b) in inserted.into_iter().enumerate() {
+                snap.insert(at + k, b);
+            }
+            // Inserting at or before the active block shifts it right.
+            if let Some(a) = active() {
+                if at <= a {
+                    active.set(Some(a + n));
+                }
+            }
+            body.set(join_blocks(&snap));
+            frozen.set(snap);
+        } else {
+            let bs = split_blocks(&body(), atomic);
+            body.set(insert_after_and_normalize(&bs, i, &text, atomic));
+        }
+    });
+
+    // Hand an inactive block row to the host's `wrap_block`, if any.
+    let render_row = move |i: usize, text: String, child: Element| -> Element {
+        match wrap_block {
+            Some(cb) => cb.call(BlockChrome {
+                index: i,
+                text,
+                children: child,
+                delete: delete_block,
+                insert_after: insert_block_after,
+            }),
+            None => child,
+        }
+    };
 
     // Drag-and-drop block reordering, via the riparion-dnd primitives. The drop event
     // carries source/target slots; we move the block and rejoin with canonical
@@ -670,12 +813,17 @@ pub fn BlockEditor(
                                 list_id: "blocks".to_string(),
                                 slot: i,
                                 class: format!("flex items-center gap-2 {block_class}"),
-                                RenderedContent {
-                                    text: blk.text.clone(),
-                                    class: "flex-1".to_string(),
-                                    render_block,
-                                    on_activate: move |_| activate.call(i),
-                                }
+                                // The host wrapper sits *inside* the draggable
+                                // card, so the ⠿ drag handle stays outside any
+                                // chrome (e.g. a context-menu trigger).
+                                {render_row(i, blk.text.clone(), rsx! {
+                                    RenderedContent {
+                                        text: blk.text.clone(),
+                                        class: "flex-1".to_string(),
+                                        render_block,
+                                        on_activate: move |_| activate.call(i),
+                                    }
+                                })}
                             }
                         }
                     }
@@ -799,13 +947,15 @@ pub fn BlockEditor(
                         }
                         }
                     } else {
-                        RenderedContent {
-                            key: "{keys[i]}",
-                            text: blk.text.clone(),
-                            class: block_class.clone(),
-                            render_block,
-                            on_activate: move |_| activate.call(i),
-                        }
+                        {render_row(i, blk.text.clone(), rsx! {
+                            RenderedContent {
+                                key: "{keys[i]}",
+                                text: blk.text.clone(),
+                                class: block_class.clone(),
+                                render_block,
+                                on_activate: move |_| activate.call(i),
+                            }
+                        })}
                     }
                 }
             }
@@ -991,5 +1141,48 @@ mod tests {
         // The bracket line is inside the fence, so it is NOT its own block.
         assert!(blocks.iter().all(|b| !b.atomic));
         assert_eq!(blocks.len(), 1);
+    }
+
+    #[test]
+    fn delete_removes_block_and_normalizes() {
+        let bs = split_blocks("A\n\nB\n\nC\n", no_atomic);
+        assert_eq!(delete_and_normalize(&bs, 1), "A\n\nC\n");
+        assert_eq!(delete_and_normalize(&bs, 0), "B\n\nC\n");
+        // Out of range: no-op (body just normalizes).
+        assert_eq!(delete_and_normalize(&bs, 9), "A\n\nB\n\nC\n");
+    }
+
+    #[test]
+    fn delete_last_block_yields_empty() {
+        let bs = split_blocks("Only\n", no_atomic);
+        assert_eq!(delete_and_normalize(&bs, 0), "");
+    }
+
+    #[test]
+    fn insert_after_adds_block_with_separator() {
+        let bs = split_blocks("A\n\nB\n", no_atomic);
+        assert_eq!(
+            insert_after_and_normalize(&bs, 0, "X", no_atomic),
+            "A\n\nX\n\nB\n"
+        );
+        // After the last block.
+        assert_eq!(
+            insert_after_and_normalize(&bs, 1, "Z", no_atomic),
+            "A\n\nB\n\nZ\n"
+        );
+        // Whitespace-only paste is dropped by normalization.
+        assert_eq!(
+            insert_after_and_normalize(&bs, 0, "   ", no_atomic),
+            "A\n\nB\n"
+        );
+    }
+
+    #[test]
+    fn insert_after_multiparagraph_paste_splits() {
+        let bs = split_blocks("A\n", no_atomic);
+        assert_eq!(
+            insert_after_and_normalize(&bs, 0, "P1\n\nP2", no_atomic),
+            "A\n\nP1\n\nP2\n"
+        );
     }
 }
