@@ -8,7 +8,8 @@
 //! A menubar above the editor (dx catalog `menubar` + `alert_dialog`, installed
 //! with `dx components add --module-path examples/markdown/components …`) adds
 //! File ▸ New (confirm, then clear), File ▸ Save (download as `.md`), and an
-//! About dialog.
+//! About dialog. Right-clicking a rendered block (dx catalog `context_menu`)
+//! offers Cut / Copy / Paste / Delete via the system clipboard.
 //!
 //! Run it in a browser with the Dioxus CLI (the `web` feature pulls in the
 //! caret/selection/drag mechanics):
@@ -23,11 +24,14 @@ use components::alert_dialog::{
     AlertDialog, AlertDialogAction, AlertDialogActions, AlertDialogCancel, AlertDialogDescription,
     AlertDialogTitle,
 };
+use components::context_menu::{
+    ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger,
+};
 use components::menubar::{Menubar, MenubarContent, MenubarItem, MenubarMenu, MenubarTrigger};
 use components::switch::Switch;
 use dioxus::prelude::*;
 use pulldown_cmark::{html, Options, Parser};
-use riparion_editor::{BlockEditor, CompletionItem};
+use riparion_editor::{BlockChrome, BlockEditor, CompletionItem};
 
 /// The demo's smart-tag catalog. A real app injects its own; here a couple of
 /// fixed entries show the `[[/` autocomplete working.
@@ -263,6 +267,10 @@ fn app() -> Element {
                 completion_menu_class: "ac-menu".to_string(),
                 completion_item_class: "ac-item".to_string(),
                 completion_item_active_class: "ac-item-active".to_string(),
+                // Right-click any rendered block for Cut / Copy / Paste / Delete
+                // (dx catalog `context_menu`). Cut/Copy go through the system
+                // clipboard; Paste inserts the clipboard below the block.
+                wrap_block: Callback::new(block_context_menu),
             }
         }
 
@@ -296,6 +304,92 @@ fn app() -> Element {
             }
         }
     }
+}
+
+/// Wrap one rendered block in a right-click context menu (dx catalog
+/// `context_menu`) offering Cut / Copy / Paste / Delete. The editor hands us the
+/// block's index, its Markdown source, the rendered child to wrap, and the
+/// structural ops to call — so the menu is pure example-side chrome.
+fn block_context_menu(chrome: BlockChrome) -> Element {
+    let BlockChrome {
+        index,
+        text,
+        children,
+        delete,
+        insert_after,
+    } = chrome;
+    let cut_text = text.clone();
+    rsx! {
+        ContextMenu {
+            ContextMenuTrigger {
+                // In arrange mode the trigger is a flex child next to the drag
+                // handle; let it fill the row (no-op in editing mode).
+                style: "flex: 1 1 0%; min-width: 0;",
+                {children}
+            }
+            ContextMenuContent {
+                ContextMenuItem {
+                    index: 0usize,
+                    value: "cut".to_string(),
+                    on_select: move |_| {
+                        clipboard_write(cut_text.clone());
+                        delete.call(index);
+                    },
+                    "Cut"
+                }
+                ContextMenuItem {
+                    index: 1usize,
+                    value: "copy".to_string(),
+                    on_select: move |_| clipboard_write(text.clone()),
+                    "Copy"
+                }
+                ContextMenuItem {
+                    index: 2usize,
+                    value: "paste".to_string(),
+                    on_select: move |_| {
+                        spawn(async move {
+                            let pasted = clipboard_read().await;
+                            if !pasted.trim().is_empty() {
+                                insert_after.call((index, pasted));
+                            }
+                        });
+                    },
+                    "Paste"
+                }
+                ContextMenuItem {
+                    index: 3usize,
+                    value: "delete".to_string(),
+                    on_select: move |_| delete.call(index),
+                    "Delete"
+                }
+            }
+        }
+    }
+}
+
+/// Write `text` to the system clipboard. Best-effort: clipboard access can be
+/// denied (insecure context, revoked permission), in which case the failure is
+/// logged to the console and the action is a no-op.
+fn clipboard_write(text: String) {
+    let eval = document::eval(
+        r#"
+        const text = await dioxus.recv();
+        try { await navigator.clipboard.writeText(text); }
+        catch (e) { console.warn("clipboard write failed:", e); }
+        "#,
+    );
+    let _ = eval.send(text);
+}
+
+/// Read the system clipboard, returning `""` when denied or empty.
+async fn clipboard_read() -> String {
+    let mut eval = document::eval(
+        r#"
+        try { dioxus.send(await navigator.clipboard.readText() ?? ""); }
+        catch (e) { console.warn("clipboard read failed:", e); dioxus.send(""); }
+        "#,
+    );
+    eval.recv::<String>().await.unwrap_or_default()
 }
 
 /// `File ▸ Save` — hand the current Markdown source to the browser as a
