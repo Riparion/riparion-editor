@@ -20,8 +20,8 @@
 mod components;
 
 use components::alert_dialog::{
-    AlertDialog, AlertDialogAction, AlertDialogActions, AlertDialogCancel,
-    AlertDialogDescription, AlertDialogTitle,
+    AlertDialog, AlertDialogAction, AlertDialogActions, AlertDialogCancel, AlertDialogDescription,
+    AlertDialogTitle,
 };
 use components::menubar::{Menubar, MenubarContent, MenubarItem, MenubarMenu, MenubarTrigger};
 use components::switch::Switch;
