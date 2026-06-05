@@ -38,6 +38,10 @@ pub struct Block {
     /// True when this block is a single `is_atomic` line (e.g. an embed) held
     /// apart so the user edits just that one line.
     pub atomic: bool,
+    /// True when this block is the document's leading YAML frontmatter
+    /// (`---` … `---` starting at byte 0). Always block 0 when present; kept
+    /// whole by [`split_blocks`] and pinned (not draggable) by [`BlockEditor`].
+    pub frontmatter: bool,
 }
 
 /// Concatenate blocks back into a single source string. The exact inverse of
@@ -55,6 +59,9 @@ pub fn join_blocks(blocks: &[Block]) -> String {
 /// Boundaries are chosen so the result both round-trips exactly and edits
 /// cleanly:
 ///
+/// * **YAML frontmatter** (`---` … `---` starting at byte 0) is one block,
+///   flagged [`frontmatter`](Block::frontmatter) — blank lines, fences and
+///   `is_atomic` lines inside it never split it.
 /// * **Fenced code** (` ``` ` / `~~~`) is never split mid-fence — blank lines
 ///   inside a fence stay with it.
 /// * A line for which `is_atomic` returns true becomes its own block.
@@ -77,8 +84,34 @@ pub fn split_blocks(md: &str, is_atomic: impl Fn(&str) -> bool) -> Vec<Block> {
             blocks.push(Block {
                 text: std::mem::take(cur),
                 atomic: false,
+                frontmatter: false,
             });
         }
+    };
+
+    // Frontmatter is the outermost rule: consume it whole before the line loop
+    // so neither the fence state nor `is_atomic` can split its interior. Only
+    // a run starting at byte 0 qualifies — a `---` later in the document falls
+    // through to the ordinary rules below.
+    let md = match frontmatter_len(md) {
+        Some(mut len) => {
+            // The blank separator after the closing delimiter attaches to the
+            // frontmatter block — same rule as any block's trailing blank line —
+            // so no stray spacer block appears between it and the body.
+            for line in md[len..].split_inclusive('\n') {
+                if !trim_line_end(line).trim().is_empty() {
+                    break;
+                }
+                len += line.len();
+            }
+            blocks.push(Block {
+                text: md[..len].to_string(),
+                atomic: false,
+                frontmatter: true,
+            });
+            &md[len..]
+        }
+        None => md,
     };
 
     // `split_inclusive` keeps each line's trailing '\n', so concatenating the
@@ -124,6 +157,7 @@ pub fn split_blocks(md: &str, is_atomic: impl Fn(&str) -> bool) -> Vec<Block> {
             blocks.push(Block {
                 text: line.to_string(),
                 atomic: true,
+                frontmatter: false,
             });
             closed = false;
             continue;
@@ -173,12 +207,60 @@ fn is_closing_fence(content: &str, fch: char, flen: usize) -> bool {
     len >= flen && t.chars().all(|c| c == fch)
 }
 
+/// If `md` opens with YAML frontmatter, return the byte length of the whole
+/// run — opening `---`, interior, and closing delimiter line (including its
+/// trailing newline, when present).
+///
+/// The opener must be exactly `---` on the very first line (byte offset 0); a
+/// `---` anywhere later in a document is a thematic break, not frontmatter.
+/// The run closes at the next line that is exactly `---` or `...` (YAML's
+/// document-end marker). An unclosed opener returns `None`, so a lone leading
+/// `---` keeps its ordinary thematic-break meaning instead of swallowing the
+/// document. Lines are compared with any trailing `\r` stripped, so CRLF
+/// sources work; the returned length is in bytes of the original `md`.
+pub fn frontmatter_len(md: &str) -> Option<usize> {
+    let mut lines = md.split_inclusive('\n');
+    let first = lines.next()?;
+    if trim_line_end(first) != "---" {
+        return None;
+    }
+    let mut len = first.len();
+    for line in lines {
+        len += line.len();
+        let content = trim_line_end(line);
+        if content == "---" || content == "..." {
+            return Some(len);
+        }
+    }
+    None
+}
+
+/// Strip a line's trailing `\n` / `\r\n`, if any.
+fn trim_line_end(line: &str) -> &str {
+    let line = line.strip_suffix('\n').unwrap_or(line);
+    line.strip_suffix('\r').unwrap_or(line)
+}
+
 /// Join blocks with canonical single-blank-line separators, dropping empty /
 /// whitespace-only blocks. Only the separators *between* blocks are touched —
 /// each block's own content (leading indentation, soft line breaks) is preserved.
 /// Used after a *structural* edit (insert, reorder) so adjacent blocks can't merge
 /// or pile up stray blank lines.
 pub fn rejoin_normalized(blocks: &[Block]) -> String {
+    // A leading frontmatter block is kept verbatim (one trailing newline) so
+    // normalization can never restructure the YAML; the body that follows is
+    // normalized as usual and separated by the canonical blank line.
+    if let Some((first, rest)) = blocks.split_first() {
+        if first.frontmatter {
+            let head = first.text.trim_end_matches(['\n', '\r']);
+            let body = rejoin_normalized(rest);
+            return if body.is_empty() {
+                format!("{head}\n")
+            } else {
+                format!("{head}\n\n{body}")
+            };
+        }
+    }
     let parts: Vec<&str> = blocks
         .iter()
         .map(|b| b.text.trim_end_matches(['\n', '\r']))
@@ -461,6 +543,7 @@ pub fn BlockEditor(
             Block {
                 text: String::new(),
                 atomic: false,
+                frontmatter: false,
             },
         );
         active.set(Some(at));
@@ -552,6 +635,13 @@ pub fn BlockEditor(
     // separators (reorder is a structural edit, so spacing is normalized).
     let on_drop = use_callback(move |evt: DragDropEvent<usize>| {
         let mut bs = split_blocks(&body(), atomic);
+        // A leading frontmatter block is pinned: it renders outside the drag
+        // area so its slot never exists, but guard defensively against any
+        // drop that would move it or land something above it.
+        let base = bs.first().map_or(0, |b| b.frontmatter as usize);
+        if evt.from_slot < base || evt.to_slot < base {
+            return;
+        }
         if evt.from_slot >= bs.len() {
             return;
         }
@@ -618,6 +708,7 @@ pub fn BlockEditor(
                     Block {
                         text: tail,
                         atomic: false,
+                        frontmatter: false,
                     },
                 );
             }
@@ -787,6 +878,12 @@ pub fn BlockEditor(
     // contains no `#` so it can't collide with a `block_keys` entry.
     let active_wrapper_key = "active-wrapper";
     let arranging = active().is_none();
+    // A leading frontmatter block is pinned while arranging: rendered above the
+    // drag area with no ⠿ handle and no drop slot, so reordering can never move
+    // it or land another block above it. (While editing it's an ordinary
+    // clickable row — clicking it opens the raw YAML in the textarea.)
+    let pinned = arranging && view.first().is_some_and(|b| b.frontmatter);
+    let base = pinned as usize;
 
     rsx! {
         // riparion-dnd's drop-zone / handle styling, plus a scoped override so idle
@@ -800,13 +897,30 @@ pub fn BlockEditor(
         }
         div { class: "riparion-editor space-y-0.5",
             if arranging {
+                // The pinned frontmatter row sits above the drag area: still
+                // clickable (activate → raw YAML textarea) and still wrapped by
+                // the host chrome, but with no drag handle.
+                if pinned {
+                    div {
+                        key: "{keys[0]}",
+                        class: "flex items-center gap-2 {block_class}",
+                        {render_row(0, view[0].text.clone(), rsx! {
+                            RenderedContent {
+                                text: view[0].text.clone(),
+                                class: "flex-1".to_string(),
+                                render_block,
+                                on_activate: move |_| activate.call(0),
+                            }
+                        })}
+                    }
+                }
                 // Arrange mode: drag a block's ⠿ handle to reorder.
                 DragDropArea::<usize> {
                     on_drop: move |evt: DragDropEvent<usize>| on_drop.call(evt),
                     DropList {
                         list_id: "blocks".to_string(),
                         count: view.len(),
-                        for (i , blk) in view.iter().enumerate() {
+                        for (i , blk) in view.iter().enumerate().skip(base) {
                             Draggable::<usize> {
                                 key: "{keys[i]}",
                                 item_id: i,
@@ -1183,6 +1297,155 @@ mod tests {
         assert_eq!(
             insert_after_and_normalize(&bs, 0, "P1\n\nP2", no_atomic),
             "A\n\nP1\n\nP2\n"
+        );
+    }
+
+    #[test]
+    fn frontmatter_kept_as_one_block() {
+        let s = "---\ntitle: Hi\ntags: [a, b]\n---\n\n# Body\n";
+        let blocks = split_blocks(s, no_atomic);
+        assert_eq!(join_blocks(&blocks), s);
+        assert_eq!(blocks.len(), 2);
+        assert!(blocks[0].frontmatter);
+        // The blank separator attaches to the frontmatter block (no spacer).
+        assert_eq!(blocks[0].text, "---\ntitle: Hi\ntags: [a, b]\n---\n\n");
+        assert!(!blocks[1].frontmatter);
+        assert_eq!(blocks[1].text, "# Body\n");
+    }
+
+    #[test]
+    fn frontmatter_roundtrips() {
+        // Hostile interior: an atomic-looking line and a fence opener must not
+        // split the frontmatter or leak fence state into the body.
+        let s =
+            "---\ntitle: Hi\n[[embed]]\n```\nnote: fence chars\n---\n\nBody\n\n```\ncode\n```\n";
+        let embeds = |l: &str| l.trim_start().starts_with("[[");
+        assert_roundtrip(s, embeds);
+        let blocks = split_blocks(s, embeds);
+        assert!(blocks[0].frontmatter);
+        assert!(blocks[0].text.ends_with("---\n\n"));
+        assert!(blocks[0].text.contains("[[embed]]"));
+        // The body fence is still one block.
+        let fence = blocks
+            .iter()
+            .find(|b| b.text.contains("code"))
+            .expect("fence block present");
+        assert!(fence.text.contains("```\ncode\n```"));
+    }
+
+    #[test]
+    fn frontmatter_blank_line_inside_does_not_split() {
+        let s = "---\ntitle: Hi\n\ndate: 2026-06-04\n---\nBody\n";
+        let blocks = split_blocks(s, no_atomic);
+        assert_eq!(join_blocks(&blocks), s);
+        assert!(blocks[0].frontmatter);
+        assert!(blocks[0].text.contains("date:"));
+    }
+
+    #[test]
+    fn frontmatter_only_at_offset_zero() {
+        let s = "Intro\n\n---\na: 1\n---\n";
+        let blocks = split_blocks(s, no_atomic);
+        assert_eq!(join_blocks(&blocks), s);
+        assert!(blocks.iter().all(|b| !b.frontmatter));
+    }
+
+    #[test]
+    fn frontmatter_leading_blank_is_not_frontmatter() {
+        let s = "\n---\na: 1\n---\n";
+        let blocks = split_blocks(s, no_atomic);
+        assert_eq!(join_blocks(&blocks), s);
+        assert!(blocks.iter().all(|b| !b.frontmatter));
+    }
+
+    #[test]
+    fn triple_dash_thematic_break_unchanged() {
+        // A `---` after prose is a thematic break / setext underline, not
+        // frontmatter — splitting behaves exactly as before.
+        let s = "Title\n---\n\nBody\n";
+        let blocks = split_blocks(s, no_atomic);
+        assert_eq!(join_blocks(&blocks), s);
+        assert!(blocks.iter().all(|b| !b.frontmatter));
+        assert_eq!(blocks.len(), 2);
+    }
+
+    #[test]
+    fn unclosed_frontmatter_is_not_frontmatter() {
+        // A lone leading `---` must not swallow the document.
+        let s = "---\ntitle: Hi\n\nBody\n";
+        assert_eq!(frontmatter_len(s), None);
+        let blocks = split_blocks(s, no_atomic);
+        assert_eq!(join_blocks(&blocks), s);
+        assert!(blocks.iter().all(|b| !b.frontmatter));
+        assert_eq!(blocks.len(), 2); // splits on the blank line as usual
+    }
+
+    #[test]
+    fn empty_frontmatter() {
+        let s = "---\n---\nBody\n";
+        let blocks = split_blocks(s, no_atomic);
+        assert_eq!(join_blocks(&blocks), s);
+        assert!(blocks[0].frontmatter);
+        assert_eq!(blocks[0].text, "---\n---\n");
+    }
+
+    #[test]
+    fn frontmatter_only_document() {
+        let s = "---\ntitle: Hi\n---\n";
+        let blocks = split_blocks(s, no_atomic);
+        assert_eq!(join_blocks(&blocks), s);
+        assert_eq!(blocks.len(), 1);
+        assert!(blocks[0].frontmatter);
+        // Closing line without a trailing newline still closes.
+        let s2 = "---\ntitle: Hi\n---";
+        assert_eq!(frontmatter_len(s2), Some(s2.len()));
+        assert_roundtrip(s2, no_atomic);
+    }
+
+    #[test]
+    fn frontmatter_dot_close() {
+        // YAML's document-end marker `...` also closes the run.
+        let s = "---\ntitle: Hi\n...\n\nBody\n";
+        let blocks = split_blocks(s, no_atomic);
+        assert_eq!(join_blocks(&blocks), s);
+        assert!(blocks[0].frontmatter);
+        assert!(blocks[0].text.ends_with("...\n\n"));
+    }
+
+    #[test]
+    fn frontmatter_crlf() {
+        let s = "---\r\ntitle: Hi\r\n---\r\n\r\nBody\r\n";
+        let blocks = split_blocks(s, no_atomic);
+        assert_eq!(join_blocks(&blocks), s);
+        assert!(blocks[0].frontmatter);
+    }
+
+    #[test]
+    fn frontmatter_no_blank_before_body() {
+        let s = "---\ntitle: Hi\n---\nBody\n";
+        let blocks = split_blocks(s, no_atomic);
+        assert_eq!(join_blocks(&blocks), s);
+        assert_eq!(blocks.len(), 2);
+        assert!(blocks[0].frontmatter);
+        assert_eq!(blocks[1].text, "Body\n");
+    }
+
+    #[test]
+    fn normalize_preserves_frontmatter() {
+        // The YAML (including its interior blank line) survives normalization
+        // verbatim; the body separator is canonicalized.
+        let s = "---\ntitle: Hi\n\ndate: x\n---\n\n\n\nBody\n";
+        assert_eq!(
+            normalize_body(s, no_atomic),
+            "---\ntitle: Hi\n\ndate: x\n---\n\nBody\n"
+        );
+    }
+
+    #[test]
+    fn normalize_frontmatter_only() {
+        assert_eq!(
+            normalize_body("---\ntitle: Hi\n---", no_atomic),
+            "---\ntitle: Hi\n---\n"
         );
     }
 }

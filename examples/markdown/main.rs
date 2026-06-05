@@ -5,6 +5,11 @@
 //! `<textarea>`. Lines that look like `[[embed]]` are marked atomic via
 //! `is_atomic` and render as a standalone card.
 //!
+//! The document's leading YAML frontmatter renders as an Obsidian-style
+//! **Properties card**: click a value to edit that field inline, add/remove
+//! fields, or hit the `{}` YAML button to edit the raw block in the normal
+//! textarea. `File ▸ Add properties` prepends frontmatter when there is none.
+//!
 //! A menubar above the editor (dx catalog `menubar` + `alert_dialog`, installed
 //! with `dx components add --module-path examples/markdown/components …`) adds
 //! File ▸ New (confirm, then clear), File ▸ Save (download as `.md`), and an
@@ -31,7 +36,7 @@ use components::menubar::{Menubar, MenubarContent, MenubarItem, MenubarMenu, Men
 use components::switch::Switch;
 use dioxus::prelude::*;
 use pulldown_cmark::{html, Options, Parser};
-use riparion_editor::{BlockChrome, BlockEditor, CompletionItem};
+use riparion_editor::{frontmatter_len, BlockChrome, BlockEditor, CompletionItem};
 
 /// The demo's smart-tag catalog. A real app injects its own; here a couple of
 /// fixed entries show the `[[/` autocomplete working.
@@ -114,15 +119,25 @@ fn completions(query: String) -> Vec<CompletionItem> {
     .collect()
 }
 
-/// Seed document, exercising headings, lists, a fenced code block, and an
-/// atomic `[[embed]]` line.
-const SEED: &str = r#"# riparion-editor
+/// Seed document, exercising YAML frontmatter (rendered as the Properties
+/// card), headings, lists, a fenced code block, and an atomic `[[embed]]` line.
+/// The `tags` sequence demonstrates the card's graceful degradation: non-scalar
+/// values show read-only and are edited through the `{}` YAML escape hatch.
+const SEED: &str = r#"---
+title: riparion-editor
+tags: [editor, dioxus, markdown]
+date: 2026-06-04
+draft: false
+---
+
+# riparion-editor
 
 A **block-swap** live-preview editor. Click any block to edit its raw Markdown;
 click away (or press Esc) to render it again.
 
 ## Try it
 
+- Click a value in the Properties card above to edit it
 - Click this list to edit it
 - Press *double-Enter* to start a new block
 - Drag the handle on the left to reorder blocks
@@ -184,6 +199,38 @@ body { margin: 0;
 .ac-item { padding: 0.35rem 0.6rem; border-radius: 0.35rem; }
 .ac-item:hover { background: var(--light, #eceef1) var(--dark, #1c2027); }
 .ac-item-active { background: var(--light, #e3effe) var(--dark, #1e3a5f); }
+/* Frontmatter "Properties" card. */
+.fm-card { border: 1px solid var(--light, #c7ccd3) var(--dark, #3a3f47);
+    border-radius: 0.5rem; padding: 0.5rem 0.75rem;
+    background: var(--light, #fff) var(--dark, #16181c); font-size: 0.9rem; }
+.fm-header { display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 0.25rem; }
+.fm-title { font-weight: 600; font-size: 0.75rem; text-transform: uppercase;
+    letter-spacing: 0.06em; color: var(--light, #6b7280) var(--dark, #9aa3af); }
+.fm-yaml-btn, .fm-add, .fm-x { border: none; background: none; cursor: pointer;
+    color: var(--light, #6b7280) var(--dark, #9aa3af);
+    border-radius: 0.3rem; font-size: 0.8rem; padding: 0.1rem 0.4rem; }
+.fm-yaml-btn { font-family: ui-monospace, SFMono-Regular, monospace; }
+.fm-yaml-btn:hover, .fm-add:hover, .fm-x:hover {
+    background: var(--light, #eceef1) var(--dark, #1c2027);
+    color: inherit; }
+.fm-row { display: grid; grid-template-columns: 9rem 1fr auto; gap: 0.5rem;
+    align-items: baseline; padding: 0.15rem 0.25rem; border-radius: 0.3rem; }
+.fm-row:hover { background: var(--light, #f3f4f6) var(--dark, #1c2027); }
+.fm-key { color: var(--light, #6b7280) var(--dark, #9aa3af);
+    font-family: ui-monospace, SFMono-Regular, monospace; font-size: 0.85em;
+    overflow-wrap: anywhere; }
+.fm-value { cursor: text; min-height: 1.2em; overflow-wrap: anywhere; }
+.fm-locked { cursor: default; opacity: 0.75;
+    font-family: ui-monospace, SFMono-Regular, monospace; font-size: 0.9em; }
+.fm-raw { grid-column: 1 / 4; opacity: 0.6; white-space: pre-wrap;
+    font-family: ui-monospace, SFMono-Regular, monospace; font-size: 0.85em; }
+.fm-empty { opacity: 0.5; font-style: italic; }
+.fm-add { justify-self: start; margin-top: 0.15rem; }
+.fm-input { box-sizing: border-box; width: 100%; padding: 0.1rem 0.3rem;
+    border: 1px solid var(--light, #c7ccd3) var(--dark, #3a3f47);
+    border-radius: 0.3rem; background: var(--light, #fff) var(--dark, #101113);
+    color: inherit; font: inherit; }
 "#;
 
 fn main() {
@@ -212,9 +259,34 @@ fn app() -> Element {
     let on_menu = move |value: String| match value.as_str() {
         "new" => confirm_new.set(true),
         "save" => save_markdown(body.peek().as_str()),
+        "props" => {
+            // Prepend a starter frontmatter run — but only when the document
+            // doesn't already open with one.
+            let doc = body.peek().clone();
+            if frontmatter_len(&doc).is_none() {
+                body.set(format!("---\ntitle: Untitled\n---\n\n{doc}"));
+            }
+        }
         "about" => about_open.set(true),
         _ => {}
     };
+
+    // Route the document's leading frontmatter block to the Properties card;
+    // everything else renders through pulldown-cmark. The block must be a whole
+    // `---…---` run (plus its absorbed blank separator) *and* be the document
+    // prefix — a lookalike block later in the document stays ordinary Markdown.
+    let render_block_or_card = use_callback(move |src: String| {
+        let is_doc_frontmatter = frontmatter_len(&src)
+            .is_some_and(|len| src[len..].trim().is_empty())
+            && body.peek().starts_with(src.as_str());
+        if is_doc_frontmatter {
+            rsx! {
+                FrontmatterCard { text: src, body }
+            }
+        } else {
+            render_block(src)
+        }
+    });
 
     rsx! {
         document::Style { {STYLES} }
@@ -229,6 +301,12 @@ fn app() -> Element {
                         MenubarContent {
                             MenubarItem { index: 0usize, value: "new", on_select: on_menu, "New" }
                             MenubarItem { index: 1usize, value: "save", on_select: on_menu, "Save" }
+                            MenubarItem {
+                                index: 2usize,
+                                value: "props",
+                                on_select: on_menu,
+                                "Add properties"
+                            }
                         }
                     }
                     MenubarMenu { index: 1usize,
@@ -255,7 +333,7 @@ fn app() -> Element {
             }
             BlockEditor {
                 body,
-                render_block: Callback::new(render_block),
+                render_block: render_block_or_card,
                 // Any line starting with `[[` is its own atomic block.
                 is_atomic: Some(Callback::new(|line: String| {
                     line.trim_start().starts_with("[[")
@@ -431,4 +509,311 @@ fn render_block(src: String) -> Element {
     let parser = Parser::new_ext(&src, Options::all());
     html::push_html(&mut out, parser);
     rsx! { div { dangerous_inner_html: "{out}" } }
+}
+
+/// Obsidian-style "Properties" card for the document's leading YAML
+/// frontmatter block.
+///
+/// Scalar `key: value` lines edit inline (click the value), with add / remove
+/// affordances. Everything else — sequences, nested maps, comments — shows
+/// read-only; the `{}` YAML button (or any click outside a field) bubbles up to
+/// the block's `on_activate`, swapping the whole block to the editor's normal
+/// raw textarea as the escape hatch. Edits are line-targeted rewrites of the
+/// raw YAML, so untouched lines (including comments and ordering) survive
+/// byte-for-byte.
+#[component]
+fn FrontmatterCard(text: String, body: Signal<String>) -> Element {
+    // Absolute YAML line index (0 = opening `---`) being edited inline.
+    let editing = use_signal(|| None::<usize>);
+    let draft = use_signal(String::new);
+    // The "+ Add property" mini-form.
+    let mut adding = use_signal(|| false);
+    let mut new_key = use_signal(String::new);
+    let mut new_value = use_signal(String::new);
+
+    // The routing guard in `app` ensures `text` is a whole frontmatter run
+    // (possibly with the trailing blank separator absorbed).
+    let yaml_len = frontmatter_len(&text).unwrap_or(text.len());
+    let lines: Vec<String> = text[..yaml_len]
+        .lines()
+        .map(|l| l.trim_end_matches('\r').to_string())
+        .collect();
+    // Interior rows between the two delimiter lines, keyed by absolute index.
+    let rows: Vec<(usize, String)> = lines
+        .get(1..lines.len().saturating_sub(1))
+        .unwrap_or_default()
+        .iter()
+        .enumerate()
+        .map(|(i, l)| (i + 1, l.clone()))
+        .collect();
+    let empty = rows.is_empty();
+
+    let mut commit_add = move || {
+        fm_append_field(body, new_key.peek().as_str(), new_value.peek().as_str());
+        adding.set(false);
+    };
+
+    rsx! {
+        div { class: "fm-card",
+            div { class: "fm-header",
+                span { class: "fm-title", "Properties" }
+                // No stop_propagation: the click bubbles to the block's
+                // on_activate and swaps the card for the raw-YAML textarea.
+                button { class: "fm-yaml-btn", title: "Edit the raw YAML", "{{}} YAML" }
+            }
+            for (line_idx , line) in rows {
+                FrontmatterRow {
+                    key: "{line_idx}:{line}",
+                    line_idx,
+                    line,
+                    body,
+                    editing,
+                    draft,
+                }
+            }
+            if empty && !adding() {
+                div { class: "fm-row", span { class: "fm-empty", "No properties" } }
+            }
+            if adding() {
+                div { class: "fm-row", onclick: move |e: MouseEvent| e.stop_propagation(),
+                    input {
+                        class: "fm-input",
+                        placeholder: "key",
+                        value: "{new_key}",
+                        oninput: move |e: FormEvent| new_key.set(e.value()),
+                        onmounted: move |e: MountedEvent| {
+                            spawn(async move {
+                                let _ = e.set_focus(true).await;
+                            });
+                        },
+                        onkeydown: move |e: KeyboardEvent| {
+                            if e.key() == Key::Enter {
+                                e.prevent_default();
+                                commit_add();
+                            } else if e.key() == Key::Escape {
+                                adding.set(false);
+                            }
+                        },
+                    }
+                    input {
+                        class: "fm-input",
+                        placeholder: "value",
+                        value: "{new_value}",
+                        oninput: move |e: FormEvent| new_value.set(e.value()),
+                        onkeydown: move |e: KeyboardEvent| {
+                            if e.key() == Key::Enter {
+                                e.prevent_default();
+                                commit_add();
+                            } else if e.key() == Key::Escape {
+                                adding.set(false);
+                            }
+                        },
+                    }
+                    button {
+                        class: "fm-x",
+                        title: "Cancel",
+                        onclick: move |e: MouseEvent| {
+                            e.stop_propagation();
+                            adding.set(false);
+                        },
+                        "✕"
+                    }
+                }
+            } else {
+                button {
+                    class: "fm-add",
+                    onclick: move |e: MouseEvent| {
+                        e.stop_propagation();
+                        new_key.set(String::new());
+                        new_value.set(String::new());
+                        adding.set(true);
+                    },
+                    "+ Add property"
+                }
+            }
+        }
+    }
+}
+
+/// One interior line of the frontmatter, rendered as a card row.
+///
+/// Three shapes: a scalar `key: value` field edits inline; a parsed but
+/// non-scalar field (`tags: [a, b]`, `key:` introducing a nested block) shows
+/// locked; anything else (comments, indented continuation lines) shows as a raw
+/// monospace line. Clicks on locked/raw rows bubble up and open the raw YAML.
+#[component]
+fn FrontmatterRow(
+    line_idx: usize,
+    line: String,
+    body: Signal<String>,
+    mut editing: Signal<Option<usize>>,
+    mut draft: Signal<String>,
+) -> Element {
+    let Some((key, value)) = fm_parse_field(&line) else {
+        return rsx! {
+            div { class: "fm-row", span { class: "fm-raw", "{line}" } }
+        };
+    };
+
+    if editing() == Some(line_idx) {
+        // Inline value editor: Enter/blur commits the rewritten line, Esc
+        // cancels. The commit is guarded on `editing` so Enter's blur (the
+        // input unmounting) can't double-commit.
+        let commit_key = key.clone();
+        let commit = move || {
+            if editing.peek().is_some() {
+                let new_line = fm_line(&commit_key, draft.peek().trim());
+                fm_rewrite_line(body, line_idx, Some(new_line));
+                editing.set(None);
+            }
+        };
+        let mut commit_b = commit.clone();
+        return rsx! {
+            div { class: "fm-row", onclick: move |e: MouseEvent| e.stop_propagation(),
+                span { class: "fm-key", "{key}" }
+                input {
+                    class: "fm-input",
+                    value: "{draft}",
+                    oninput: move |e: FormEvent| draft.set(e.value()),
+                    onmounted: move |e: MountedEvent| {
+                        spawn(async move {
+                            let _ = e.set_focus(true).await;
+                        });
+                    },
+                    onkeydown: {
+                        let mut commit = commit.clone();
+                        move |e: KeyboardEvent| {
+                            if e.key() == Key::Enter {
+                                e.prevent_default();
+                                commit();
+                            } else if e.key() == Key::Escape {
+                                editing.set(None);
+                            }
+                        }
+                    },
+                    onblur: move |_| commit_b(),
+                }
+            }
+        };
+    }
+
+    if fm_scalar_editable(&value) {
+        let display = value.clone();
+        rsx! {
+            div { class: "fm-row",
+                span { class: "fm-key", "{key}" }
+                span {
+                    class: "fm-value",
+                    title: "Click to edit",
+                    onclick: move |e: MouseEvent| {
+                        e.stop_propagation();
+                        draft.set(value.clone());
+                        editing.set(Some(line_idx));
+                    },
+                    "{display}"
+                }
+                button {
+                    class: "fm-x",
+                    title: "Remove property",
+                    onclick: move |e: MouseEvent| {
+                        e.stop_propagation();
+                        fm_rewrite_line(body, line_idx, None);
+                    },
+                    "✕"
+                }
+            }
+        }
+    } else {
+        rsx! {
+            div { class: "fm-row",
+                span { class: "fm-key", "{key}" }
+                span { class: "fm-locked", title: "Edit via the {{}} YAML button", "{value}" }
+            }
+        }
+    }
+}
+
+/// Parse a top-level `key: value` frontmatter line. The key must be unindented,
+/// `[A-Za-z0-9_.-]+`, and followed by `:` plus whitespace (or end of line) —
+/// so `http://…` continuation text never reads as a field.
+fn fm_parse_field(line: &str) -> Option<(String, String)> {
+    if line.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let (key, rest) = line.split_once(':')?;
+    let key_ok = !key.is_empty()
+        && key
+            .chars()
+            .all(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | '.'));
+    if !key_ok || !(rest.is_empty() || rest.starts_with(char::is_whitespace)) {
+        return None;
+    }
+    Some((key.to_string(), rest.trim().to_string()))
+}
+
+/// True when `value` is a plain scalar the card can edit inline. Flow
+/// sequences/maps, anchors, block scalars and empty values (which may introduce
+/// a nested block) stay read-only — the raw-YAML escape hatch edits those.
+fn fm_scalar_editable(value: &str) -> bool {
+    !value.is_empty() && !value.starts_with(['[', '{', '&', '*', '|', '>', '#'])
+}
+
+/// Render a `key: value` line (just `key:` when the value is empty).
+fn fm_line(key: &str, value: &str) -> String {
+    if value.is_empty() {
+        format!("{key}:")
+    } else {
+        format!("{key}: {value}")
+    }
+}
+
+/// Rewrite (`Some`) or remove (`None`) one interior line of the document's
+/// leading frontmatter, leaving every other byte of the document untouched.
+/// The delimiter lines are never touched.
+fn fm_rewrite_line(mut body: Signal<String>, line_idx: usize, new_line: Option<String>) {
+    let doc = body.peek().clone();
+    let Some(len) = frontmatter_len(&doc) else {
+        return;
+    };
+    let mut lines: Vec<String> = doc[..len]
+        .lines()
+        .map(|l| l.trim_end_matches('\r').to_string())
+        .collect();
+    if line_idx == 0 || line_idx + 1 >= lines.len() {
+        return;
+    }
+    match new_line {
+        Some(l) => lines[line_idx] = l,
+        None => {
+            lines.remove(line_idx);
+        }
+    }
+    body.set(format!("{}\n{}", lines.join("\n"), &doc[len..]));
+}
+
+/// Append a `key: value` field just above the closing delimiter of the
+/// document's leading frontmatter. Invalid keys are dropped silently (demo).
+fn fm_append_field(mut body: Signal<String>, key: &str, value: &str) {
+    let key = key.trim();
+    let key_ok = !key.is_empty()
+        && key
+            .chars()
+            .all(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | '.'));
+    if !key_ok {
+        return;
+    }
+    let doc = body.peek().clone();
+    let Some(len) = frontmatter_len(&doc) else {
+        return;
+    };
+    let mut lines: Vec<String> = doc[..len]
+        .lines()
+        .map(|l| l.trim_end_matches('\r').to_string())
+        .collect();
+    if lines.len() < 2 {
+        return;
+    }
+    let at = lines.len() - 1;
+    lines.insert(at, fm_line(key, value.trim()));
+    body.set(format!("{}\n{}", lines.join("\n"), &doc[len..]));
 }
