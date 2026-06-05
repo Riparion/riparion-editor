@@ -4,12 +4,19 @@ use dioxus_primitives::alert_dialog::{
     AlertDialogDescriptionProps, AlertDialogRootProps, AlertDialogTitleProps,
 };
 
+// Asset pinned via explicit `document::Stylesheet` — see menubar/component.rs.
+pub(crate) const ALERT_DIALOG_CSS: Asset = asset!(
+    "/examples/markdown/components/alert_dialog/style.css",
+    AssetOptions::css_module()
+);
+
 #[css_module("/examples/markdown/components/alert_dialog/style.css")]
 struct Styles;
 
 #[component]
 pub fn AlertDialog(props: AlertDialogRootProps) -> Element {
     rsx! {
+        document::Stylesheet { href: ALERT_DIALOG_CSS }
         alert_dialog::AlertDialogRoot {
             class: Styles::dx_alert_dialog_backdrop,
             id: props.id,

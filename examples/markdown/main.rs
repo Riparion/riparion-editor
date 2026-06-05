@@ -321,6 +321,14 @@ fn app() -> Element {
         // Design tokens (colors, radii, focus rings) shared by the dx catalog
         // widgets under `components/`.
         document::Link { rel: "stylesheet", href: asset!("/assets/dx-components-theme.css") }
+        // Pin every catalog widget's `#[css_module]` stylesheet from this
+        // permanently-mounted root: the macro's own OnceLock <link> injection
+        // drops on remounts, leaving the widgets unstyled. The browser
+        // de-dupes by href, so the in-widget emits stay harmless.
+        document::Stylesheet { href: components::menubar::MENUBAR_CSS }
+        document::Stylesheet { href: components::switch::SWITCH_CSS }
+        document::Stylesheet { href: components::alert_dialog::ALERT_DIALOG_CSS }
+        document::Stylesheet { href: components::context_menu::CONTEXT_MENU_CSS }
         div { class: "page",
             div { class: "toolbar",
                 Menubar {

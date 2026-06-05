@@ -3,12 +3,19 @@ use dioxus_primitives::context_menu::{
     self, ContextMenuContentProps, ContextMenuItemProps, ContextMenuProps, ContextMenuTriggerProps,
 };
 
+// Asset pinned via explicit `document::Stylesheet` — see menubar/component.rs.
+pub(crate) const CONTEXT_MENU_CSS: Asset = asset!(
+    "/examples/markdown/components/context_menu/style.css",
+    AssetOptions::css_module()
+);
+
 #[css_module("/examples/markdown/components/context_menu/style.css")]
 struct Styles;
 
 #[component]
 pub fn ContextMenu(props: ContextMenuProps) -> Element {
     rsx! {
+        document::Stylesheet { href: CONTEXT_MENU_CSS }
         context_menu::ContextMenu {
             disabled: props.disabled,
             open: props.open,

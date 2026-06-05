@@ -3,12 +3,22 @@ use dioxus_primitives::menubar::{
     self, MenubarContentProps, MenubarItemProps, MenubarMenuProps, MenubarProps,
     MenubarTriggerProps,
 };
+// The Asset is declared separately and pinned with an explicit
+// `document::Stylesheet` (here and from main.rs): `#[css_module]`'s own
+// OnceLock-driven <link> injection silently drops on remounts, leaving the
+// widget unstyled.
+pub(crate) const MENUBAR_CSS: Asset = asset!(
+    "/examples/markdown/components/menubar/style.css",
+    AssetOptions::css_module()
+);
+
 #[css_module("/examples/markdown/components/menubar/style.css")]
 struct Styles;
 
 #[component]
 pub fn Menubar(props: MenubarProps) -> Element {
     rsx! {
+        document::Stylesheet { href: MENUBAR_CSS }
         menubar::Menubar {
             class: Styles::dx_menubar,
             disabled: props.disabled,

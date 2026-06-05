@@ -1,12 +1,19 @@
 use dioxus::prelude::*;
 use dioxus_primitives::switch::{self, SwitchProps};
 
+// Asset pinned via explicit `document::Stylesheet` — see menubar/component.rs.
+pub(crate) const SWITCH_CSS: Asset = asset!(
+    "/examples/markdown/components/switch/style.css",
+    AssetOptions::css_module()
+);
+
 #[css_module("/examples/markdown/components/switch/style.css")]
 struct Styles;
 
 #[component]
 pub fn Switch(props: SwitchProps) -> Element {
     rsx! {
+        document::Stylesheet { href: SWITCH_CSS }
         switch::Switch {
             class: Styles::dx_switch,
             checked: props.checked,
