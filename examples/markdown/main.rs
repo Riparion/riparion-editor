@@ -12,9 +12,12 @@
 //!
 //! A menubar above the editor (dx catalog `menubar` + `alert_dialog`, installed
 //! with `dx components add --module-path examples/markdown/components …`) adds
-//! File ▸ New (confirm, then clear), File ▸ Save (download as `.md`), and an
-//! About dialog. Right-clicking a rendered block (dx catalog `context_menu`)
-//! offers Cut / Copy / Paste / Delete via the system clipboard.
+//! File ▸ New (confirm, then clear), File ▸ Open / Save / Save As (OS-native
+//! dialogs via the File System Access API where available — Save writes back
+//! to the opened file in place; elsewhere Open falls back to `<input
+//! type=file>` and Save to a `.md` download), and an About dialog.
+//! Right-clicking a rendered block (dx catalog `context_menu`) offers
+//! Cut / Copy / Paste / Delete via the system clipboard.
 //!
 //! Run it in a browser with the Dioxus CLI (the `web` feature pulls in the
 //! caret/selection/drag mechanics):
@@ -244,6 +247,11 @@ fn app() -> Element {
     let mut confirm_new = use_signal(|| false);
     let mut about_open = use_signal(|| false);
 
+    // Name of the file we opened / last saved as. Used as the Save As
+    // suggestion; the writable handle itself lives JS-side (a
+    // `FileSystemFileHandle` can't cross the wasm boundary).
+    let mut file_name = use_signal(|| "document.md".to_string());
+
     // Light/dark theme, toggled by the switch at the right end of the menubar.
     // dx-components-theme.css keys its color tokens off `<html data-theme=…>`,
     // and the demo's own styles follow the same toggles (see STYLES).
@@ -258,7 +266,27 @@ fn app() -> Element {
     // One dispatcher for every menu item; the item's `value` says what to do.
     let on_menu = move |value: String| match value.as_str() {
         "new" => confirm_new.set(true),
-        "save" => save_markdown(body.peek().as_str()),
+        "open" => {
+            spawn(async move {
+                if let Some((name, text)) = open_markdown().await {
+                    body.set(text);
+                    file_name.set(name);
+                }
+            });
+        }
+        "save" | "saveas" => {
+            // `Save` writes back through the open file handle when there is
+            // one; `Save As` always raises the picker. Both fall back to a
+            // download where the File System Access API is unavailable.
+            let force_picker = value == "saveas";
+            let content = body.peek().clone();
+            let suggested = file_name.peek().clone();
+            spawn(async move {
+                if let Some(name) = save_markdown(content, suggested, force_picker).await {
+                    file_name.set(name);
+                }
+            });
+        }
         "props" => {
             // Prepend a starter frontmatter run — but only when the document
             // doesn't already open with one.
@@ -300,9 +328,16 @@ fn app() -> Element {
                         MenubarTrigger { "File" }
                         MenubarContent {
                             MenubarItem { index: 0usize, value: "new", on_select: on_menu, "New" }
-                            MenubarItem { index: 1usize, value: "save", on_select: on_menu, "Save" }
+                            MenubarItem { index: 1usize, value: "open", on_select: on_menu, "Open…" }
+                            MenubarItem { index: 2usize, value: "save", on_select: on_menu, "Save" }
                             MenubarItem {
-                                index: 2usize,
+                                index: 3usize,
+                                value: "saveas",
+                                on_select: on_menu,
+                                "Save As…"
+                            }
+                            MenubarItem {
+                                index: 4usize,
                                 value: "props",
                                 on_select: on_menu,
                                 "Add properties"
@@ -361,7 +396,13 @@ fn app() -> Element {
             AlertDialogActions {
                 AlertDialogCancel { "Cancel" }
                 AlertDialogAction {
-                    on_click: move |_| body.set(String::new()),
+                    on_click: move |_| {
+                        body.set(String::new());
+                        // Detach the opened file: a Save on the fresh document
+                        // must not overwrite whatever was open before.
+                        file_name.set("document.md".to_string());
+                        document::eval("window.__riparionFileHandle = null;");
+                    },
                     "Clear editor"
                 }
             }
@@ -470,25 +511,95 @@ async fn clipboard_read() -> String {
     eval.recv::<String>().await.unwrap_or_default()
 }
 
-/// `File ▸ Save` — hand the current Markdown source to the browser as a
-/// `document.md` download (a wasm app has no direct disk access, so "save to
-/// local disk" means a Blob + temporary object-URL anchor click).
-fn save_markdown(content: &str) {
-    let eval = document::eval(
+/// `File ▸ Open` — the OS-native open dialog via the File System Access API
+/// (Chromium). The returned `FileSystemFileHandle` is stashed JS-side in
+/// `window.__riparionFileHandle` so a later Save can write back in place.
+/// Where the API is missing (Firefox, Safari) a hidden `<input type=file>`
+/// supplies the same dialog without the writable handle. Returns
+/// `(file_name, contents)`, or `None` when the user cancels.
+async fn open_markdown() -> Option<(String, String)> {
+    let mut eval = document::eval(
         r#"
-        const text = await dioxus.recv();
+        const MD = [{ description: "Markdown",
+                      accept: { "text/markdown": [".md", ".markdown", ".txt"] } }];
+        try {
+            if (window.showOpenFilePicker) {
+                const [handle] = await window.showOpenFilePicker({ types: MD });
+                window.__riparionFileHandle = handle;
+                const file = await handle.getFile();
+                dioxus.send([file.name, await file.text()]);
+            } else {
+                const input = document.createElement("input");
+                input.type = "file";
+                input.accept = ".md,.markdown,.txt,text/markdown";
+                const picked = await new Promise((resolve) => {
+                    input.onchange = () => resolve(input.files?.[0] ?? null);
+                    input.oncancel = () => resolve(null);
+                    input.click();
+                });
+                window.__riparionFileHandle = null;
+                dioxus.send(picked ? [picked.name, await picked.text()] : null);
+            }
+        } catch (e) {
+            // AbortError is the user dismissing the picker — not a failure.
+            if (e?.name !== "AbortError") console.warn("open failed:", e);
+            dioxus.send(null);
+        }
+        "#,
+    );
+    eval.recv::<Option<(String, String)>>().await.ok().flatten()
+}
+
+/// `File ▸ Save` / `File ▸ Save As` — write through the File System Access API
+/// when available: Save reuses the handle stashed by Open / a previous Save As
+/// (a true in-place save), while `force_picker` (Save As) always raises the
+/// OS-native save dialog. Browsers without the API get the old behavior — a
+/// Blob + temporary object-URL anchor click, i.e. a download. Returns the
+/// saved file's name, or `None` when the user cancels the picker.
+async fn save_markdown(
+    content: String,
+    suggested_name: String,
+    force_picker: bool,
+) -> Option<String> {
+    let mut eval = document::eval(
+        r#"
+        const [text, suggested, forcePicker] = await dioxus.recv();
+        try {
+            let handle = forcePicker ? null : window.__riparionFileHandle;
+            if (!handle && window.showSaveFilePicker) {
+                handle = await window.showSaveFilePicker({
+                    suggestedName: suggested,
+                    types: [{ description: "Markdown",
+                              accept: { "text/markdown": [".md"] } }],
+                });
+                window.__riparionFileHandle = handle;
+            }
+            if (handle) {
+                const writable = await handle.createWritable();
+                await writable.write(text);
+                await writable.close();
+                dioxus.send(handle.name);
+                return;
+            }
+        } catch (e) {
+            if (e?.name === "AbortError") { dioxus.send(null); return; }
+            console.warn("save failed, falling back to download:", e);
+        }
+        // No File System Access API (or the write failed): download instead.
         const blob = new Blob([text], { type: "text/markdown" });
         const url = URL.createObjectURL(blob);
         const a = document.createElement("a");
         a.href = url;
-        a.download = "document.md";
+        a.download = suggested;
         document.body.appendChild(a);
         a.click();
         a.remove();
         URL.revokeObjectURL(url);
+        dioxus.send(suggested);
         "#,
     );
-    let _ = eval.send(content);
+    let _ = eval.send((content, suggested_name, force_picker));
+    eval.recv::<Option<String>>().await.ok().flatten()
 }
 
 /// Turn one block's Markdown source into an [`Element`].
