@@ -17,6 +17,9 @@ typical use, but the crate is **renderer-agnostic** — you inject the renderer.
   `is_atomic`); the crate pins no markdown dialect, sanitizer, or embed syntax.
 - **Lossless block model** — `split_blocks` / `join_blocks` round-trip the source
   byte-for-byte (respecting fenced code and atomic lines).
+- **YAML frontmatter aware** — a leading `---…---` run stays one block (flagged
+  `Block::frontmatter`), pinned at the top and excluded from drag-reorder; render
+  it however you like (the example shows an Obsidian-style Properties card).
 - **Drag-to-reorder** blocks (via [`riparion-dnd`](https://github.com/Riparion/riparion-dnd)).
 - **Keyboard editing** (web): double-Enter starts a new block with the caret in
   it; cross-block arrow navigation (column-preserving); selection formatting —
@@ -58,8 +61,8 @@ fn Editor(body: Signal<String>) -> Element {
 | `textarea_class` | `String` | Class for the active-block `<textarea>`. |
 
 Public helpers (`split_blocks`, `join_blocks`, `rejoin_normalized`,
-`normalize_body`) are exposed for hosts that want to operate on the block model
-directly.
+`normalize_body`, `frontmatter_len`) are exposed for hosts that want to operate
+on the block model directly.
 
 ## Features flag
 
