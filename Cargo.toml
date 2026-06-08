@@ -47,19 +47,11 @@ features = [
     "InputEvent",
 ]
 
-[dev-dependencies]
-# Only the `markdown` example needs a concrete renderer; the crate itself pins
-# no markdown dialect.
-pulldown-cmark = { version = "0.12", default-features = false, features = ["html"] }
-
-# The example's menubar / alert-dialog widgets (installed with `dx components
-# add --module-path examples/markdown/components menubar alert_dialog`) wrap
-# these primitives. Dev-only: the library itself ships no widgets.
-dioxus-primitives = { git = "https://github.com/DioxusLabs/components", version = "0.0.1", default-features = false }
-
-# The runnable demo. Gated on `web` (it calls `dioxus::launch`, which needs a
-# renderer) so the default host build — and `cargo clippy --all-targets` — skips
-# it. Run with: `dx serve --example markdown --features web`.
-[[example]]
-name = "markdown"
-required-features = ["web"]
+# This crate is the workspace root: the library above, plus the runnable
+# `riparion-mdedit` demo app under `apps/markdown` (its own crate so it owns its
+# renderer/widget deps — the library itself pins no markdown dialect). The app
+# is a binary that needs a web renderer, so it lives in a separate crate rather
+# than the root package's `--all-targets` set (which host clippy/test build).
+[workspace]
+members = ["apps/markdown"]
+resolver = "2"

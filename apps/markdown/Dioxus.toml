@@ -1,0 +1,8 @@
+[application]
+name = "riparion-mdedit"
+# The app's only target. `dx serve` builds wasm and enables the `web` feature
+# (default), which forwards `dioxus/web` + `riparion-editor/web`.
+default_platform = "web"
+
+[web.app]
+title = "riparion-mdedit — Markdown editor"

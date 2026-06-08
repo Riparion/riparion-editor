@@ -8,11 +8,11 @@ use dioxus_primitives::menubar::{
 // OnceLock-driven <link> injection silently drops on remounts, leaving the
 // widget unstyled.
 pub(crate) const MENUBAR_CSS: Asset = asset!(
-    "/examples/markdown/components/menubar/style.css",
+    "/src/components/menubar/style.css",
     AssetOptions::css_module()
 );
 
-#[css_module("/examples/markdown/components/menubar/style.css")]
+#[css_module("/src/components/menubar/style.css")]
 struct Styles;
 
 #[component]

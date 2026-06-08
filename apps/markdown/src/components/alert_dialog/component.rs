@@ -6,11 +6,11 @@ use dioxus_primitives::alert_dialog::{
 
 // Asset pinned via explicit `document::Stylesheet` — see menubar/component.rs.
 pub(crate) const ALERT_DIALOG_CSS: Asset = asset!(
-    "/examples/markdown/components/alert_dialog/style.css",
+    "/src/components/alert_dialog/style.css",
     AssetOptions::css_module()
 );
 
-#[css_module("/examples/markdown/components/alert_dialog/style.css")]
+#[css_module("/src/components/alert_dialog/style.css")]
 struct Styles;
 
 #[component]

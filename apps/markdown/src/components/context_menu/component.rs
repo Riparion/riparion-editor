@@ -5,11 +5,11 @@ use dioxus_primitives::context_menu::{
 
 // Asset pinned via explicit `document::Stylesheet` — see menubar/component.rs.
 pub(crate) const CONTEXT_MENU_CSS: Asset = asset!(
-    "/examples/markdown/components/context_menu/style.css",
+    "/src/components/context_menu/style.css",
     AssetOptions::css_module()
 );
 
-#[css_module("/examples/markdown/components/context_menu/style.css")]
+#[css_module("/src/components/context_menu/style.css")]
 struct Styles;
 
 #[component]

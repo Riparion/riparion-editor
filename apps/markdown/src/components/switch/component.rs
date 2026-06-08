@@ -3,11 +3,11 @@ use dioxus_primitives::switch::{self, SwitchProps};
 
 // Asset pinned via explicit `document::Stylesheet` — see menubar/component.rs.
 pub(crate) const SWITCH_CSS: Asset = asset!(
-    "/examples/markdown/components/switch/style.css",
+    "/src/components/switch/style.css",
     AssetOptions::css_module()
 );
 
-#[css_module("/examples/markdown/components/switch/style.css")]
+#[css_module("/src/components/switch/style.css")]
 struct Styles;
 
 #[component]

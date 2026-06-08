@@ -49,3 +49,9 @@ jobs:
       # The browser build: enables web-sys caret/selection + riparion-dnd's web drag.
       - name: cargo clippy (web)
         run: cargo clippy --no-default-features --features web --target wasm32-unknown-unknown -- -D warnings
+
+      # The demo app (riparion-mdedit) is a separate binary crate that only
+      # builds for web (default feature), so the host job skips it — clippy it
+      # here against wasm.
+      - name: cargo clippy (mdedit app)
+        run: cargo clippy -p riparion-mdedit --target wasm32-unknown-unknown -- -D warnings
