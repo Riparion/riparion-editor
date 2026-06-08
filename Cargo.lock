@@ -2386,12 +2386,20 @@ name = "riparion-editor"
 version = "0.1.0"
 dependencies = [
  "dioxus",
- "dioxus-primitives",
  "dioxus-web",
- "pulldown-cmark",
  "riparion-dnd",
  "wasm-bindgen",
  "web-sys",
+]
+
+[[package]]
+name = "riparion-mdedit"
+version = "0.1.0"
+dependencies = [
+ "dioxus",
+ "dioxus-primitives",
+ "pulldown-cmark",
+ "riparion-editor",
 ]
 
 [[package]]

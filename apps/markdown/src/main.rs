@@ -5,25 +5,29 @@
 //! `<textarea>`. Lines that look like `[[embed]]` are marked atomic via
 //! `is_atomic` and render as a standalone card.
 //!
-//! The document's leading YAML frontmatter renders as an Obsidian-style
-//! **Properties card**: click a value to edit that field inline, add/remove
-//! fields, or hit the `{}` YAML button to edit the raw block in the normal
-//! textarea. `File ▸ Add properties` prepends frontmatter when there is none.
+//! The document's leading YAML frontmatter is hidden from the preview and
+//! edited through `Edit ▸ Document Properties`, which opens an Obsidian-style
+//! **Properties card** in a modal dialog: click a value to edit that field
+//! inline, add/remove fields, or — when the document has no frontmatter yet —
+//! prepend a starter run. (The hidden frontmatter row stays clickable as a
+//! raw-YAML escape hatch into the normal textarea.)
 //!
-//! A menubar above the editor (dx catalog `menubar` + `alert_dialog`, installed
-//! with `dx components add --module-path examples/markdown/components …`) adds
+//! A menubar above the editor (dx catalog `menubar` + `alert_dialog` + `dialog`,
+//! installed with `dx components add --module-path src/components …`) adds
 //! File ▸ New (confirm, then clear), File ▸ Open / Save / Save As (OS-native
 //! dialogs via the File System Access API where available — Save writes back
 //! to the opened file in place; elsewhere Open falls back to `<input
-//! type=file>` and Save to a `.md` download), and an About dialog.
+//! type=file>` and Save to a `.md` download), Edit ▸ Document Properties, and an
+//! About dialog.
 //! Right-clicking a rendered block (dx catalog `context_menu`) offers
 //! Cut / Copy / Paste / Delete via the system clipboard.
 //!
-//! Run it in a browser with the Dioxus CLI (the `web` feature pulls in the
-//! caret/selection/drag mechanics):
+//! Run it in a browser with the Dioxus CLI from this crate's directory (the
+//! `web` feature is on by default, pulling in the caret/selection/drag
+//! mechanics):
 //!
 //! ```sh
-//! dx serve --example markdown --features web
+//! dx serve
 //! ```
 
 mod components;
@@ -35,6 +39,7 @@ use components::alert_dialog::{
 use components::context_menu::{
     ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger,
 };
+use components::dialog::{Dialog, DialogTitle};
 use components::menubar::{Menubar, MenubarContent, MenubarItem, MenubarMenu, MenubarTrigger};
 use components::switch::Switch;
 use dioxus::prelude::*;
@@ -234,6 +239,12 @@ body { margin: 0;
     border: 1px solid var(--light, #c7ccd3) var(--dark, #3a3f47);
     border-radius: 0.3rem; background: var(--light, #fff) var(--dark, #101113);
     color: inherit; font: inherit; }
+/* The leading frontmatter run is hidden from the preview — properties live in
+   the `Edit ▸ Document Properties` dialog. The thin row keeps the block
+   clickable as a raw-YAML escape hatch. */
+.fm-hidden { min-height: 0.5rem; }
+/* Footer of the Properties dialog. */
+.dlg-actions { display: flex; justify-content: flex-end; margin-top: 0.75rem; }
 "#;
 
 fn main() {
@@ -246,6 +257,8 @@ fn app() -> Element {
     // instead of clearing the editor outright.
     let mut confirm_new = use_signal(|| false);
     let mut about_open = use_signal(|| false);
+    // `Edit ▸ Document Properties` opens the Properties editor in a modal dialog.
+    let mut props_open = use_signal(|| false);
 
     // Name of the file we opened / last saved as. Used as the Save As
     // suggestion; the writable handle itself lives JS-side (a
@@ -288,28 +301,40 @@ fn app() -> Element {
             });
         }
         "props" => {
-            // Prepend a starter frontmatter run — but only when the document
-            // doesn't already open with one.
-            let doc = body.peek().clone();
-            if frontmatter_len(&doc).is_none() {
-                body.set(format!("---\ntitle: Untitled\n---\n\n{doc}"));
-            }
+            // The menubar selects items on `pointerdown` and closes the menu in
+            // the same event; the `dialog` primitive light-dismisses on the next
+            // outside `pointerdown`/`focusin`. Opening synchronously lets the
+            // tail of this very click (focus restoring as the menu closes) land
+            // outside the just-mounted dialog and dismiss it instantly — the
+            // open/close flash. Defer the open two animation frames so that
+            // interaction fully settles first. (`AlertDialog` has no
+            // light-dismiss, which is why the About dialog is unaffected.)
+            spawn(async move {
+                let mut eval = document::eval(
+                    "await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+                     dioxus.send(true);",
+                );
+                let _ = eval.recv::<bool>().await;
+                props_open.set(true);
+            });
         }
         "about" => about_open.set(true),
         _ => {}
     };
 
-    // Route the document's leading frontmatter block to the Properties card;
-    // everything else renders through pulldown-cmark. The block must be a whole
-    // `---…---` run (plus its absorbed blank separator) *and* be the document
-    // prefix — a lookalike block later in the document stays ordinary Markdown.
+    // The document's leading frontmatter is metadata, not body content: it's
+    // edited through `Edit ▸ Document Properties` (the Properties dialog), so
+    // hide it from the inline preview. The block must be a whole `---…---` run
+    // (plus its absorbed blank separator) *and* be the document prefix — a
+    // lookalike block later in the document stays ordinary Markdown. Click the
+    // hidden row to fall back to editing the raw YAML in the normal textarea.
     let render_block_or_card = use_callback(move |src: String| {
         let is_doc_frontmatter = frontmatter_len(&src)
             .is_some_and(|len| src[len..].trim().is_empty())
             && body.peek().starts_with(src.as_str());
         if is_doc_frontmatter {
             rsx! {
-                FrontmatterCard { text: src, body }
+                div { class: "fm-hidden", title: "Document properties — edit via Edit ▸ Document Properties" }
             }
         } else {
             render_block(src)
@@ -329,6 +354,7 @@ fn app() -> Element {
         document::Stylesheet { href: components::switch::SWITCH_CSS }
         document::Stylesheet { href: components::alert_dialog::ALERT_DIALOG_CSS }
         document::Stylesheet { href: components::context_menu::CONTEXT_MENU_CSS }
+        document::Stylesheet { href: components::dialog::DIALOG_CSS }
         div { class: "page",
             div { class: "toolbar",
                 Menubar {
@@ -344,22 +370,27 @@ fn app() -> Element {
                                 on_select: on_menu,
                                 "Save As…"
                             }
-                            MenubarItem {
-                                index: 4usize,
-                                value: "props",
-                                on_select: on_menu,
-                                "Add properties"
-                            }
                         }
                     }
                     MenubarMenu { index: 1usize,
-                        MenubarTrigger { "About" }
+                        MenubarTrigger { "Edit" }
+                        MenubarContent {
+                            MenubarItem {
+                                index: 0usize,
+                                value: "props",
+                                on_select: on_menu,
+                                "Document Properties…"
+                            }
+                        }
+                    }
+                    MenubarMenu { index: 2usize,
+                        MenubarTrigger { "Help" }
                         MenubarContent {
                             MenubarItem {
                                 index: 0usize,
                                 value: "about",
                                 on_select: on_menu,
-                                "About riparion-editor"
+                                "About"
                             }
                         }
                     }
@@ -416,15 +447,37 @@ fn app() -> Element {
             }
         }
 
+        // `Edit ▸ Document Properties` — the Obsidian-style Properties editor,
+        // now hosted in a modal dialog instead of inline in the document.
+        Dialog {
+            open: props_open(),
+            on_open_change: move |v| props_open.set(v),
+            DialogTitle { "Document Properties" }
+            DocumentProperties { body }
+            div { class: "dlg-actions",
+                button {
+                    class: "fm-yaml-btn",
+                    onclick: move |_| props_open.set(false),
+                    "Done"
+                }
+            }
+        }
+
         // `About` — a plain informational dialog.
         AlertDialog {
             open: about_open(),
             on_open_change: move |v| about_open.set(v),
-            AlertDialogTitle { "About riparion-editor" }
+            AlertDialogTitle { "About riparion-mdedit" }
             AlertDialogDescription {
                 "A block-swap live-preview Markdown editor for Dioxus: inactive "
                 "blocks render as HTML, the block you click swaps to a raw "
                 "textarea. Bring your own renderer; drag to reorder."
+                br {}
+                br {}
+                // `env!` bakes this crate's Cargo.toml version in at compile
+                // time; the &'static str renders as a plain text node.
+                "Version "
+                {env!("CARGO_PKG_VERSION")}
             }
             AlertDialogActions {
                 AlertDialogCancel { "OK" }
@@ -628,6 +681,38 @@ fn render_block(src: String) -> Element {
     let parser = Parser::new_ext(&src, Options::all());
     html::push_html(&mut out, parser);
     rsx! { div { dangerous_inner_html: "{out}" } }
+}
+
+/// Body of the `Document Properties` dialog. Shows the [`FrontmatterCard`]
+/// editor when the document already opens with a frontmatter run; otherwise it
+/// offers to prepend a starter `---…---` block (the old `File ▸ Add properties`
+/// behavior), after which the card appears. Reading `body()` subscribes the
+/// dialog so it swaps from the button to the card the moment frontmatter exists.
+#[component]
+fn DocumentProperties(mut body: Signal<String>) -> Element {
+    let doc = body();
+    if let Some(len) = frontmatter_len(&doc) {
+        let text = doc[..len].to_string();
+        rsx! {
+            FrontmatterCard { text, body }
+        }
+    } else {
+        rsx! {
+            div { class: "fm-card",
+                div { class: "fm-row", span { class: "fm-empty", "No properties yet." } }
+                button {
+                    class: "fm-add",
+                    onclick: move |_| {
+                        let doc = body.peek().clone();
+                        if frontmatter_len(&doc).is_none() {
+                            body.set(format!("---\ntitle: Untitled\n---\n\n{doc}"));
+                        }
+                    },
+                    "+ Add properties"
+                }
+            }
+        }
+    }
 }
 
 /// Obsidian-style "Properties" card for the document's leading YAML
