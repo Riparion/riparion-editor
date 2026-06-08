@@ -41,6 +41,10 @@ features = [
     # `Element` is the mounted-event web type we cast to a textarea to place the
     # caret when arrow-navigating into an adjacent block.
     "Element",
+    # `InputEvent` lets `oninput` read the `inputType` (insertLineBreak / …) so a
+    # touch-keyboard Enter — which never arrives as a `Key::Enter` keydown — can
+    # still split a block at the cursor.
+    "InputEvent",
 ]
 
 [dev-dependencies]

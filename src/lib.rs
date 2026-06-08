@@ -397,6 +397,36 @@ fn textarea_state(
     Some((ta, value, start, end))
 }
 
+/// Read `(value, caret_byte_offset)` from the textarea behind an `oninput` event,
+/// but only when that input was a deliberate line-break insertion (Enter on a
+/// soft keyboard, which never surfaces as a `Key::Enter` keydown). Typing, paste,
+/// and autocorrect return `None` so they can't trigger a block split. The fallback
+/// when the event isn't an `InputEvent` is permissive — the caller's "blank line"
+/// guard is itself specific enough.
+#[cfg(feature = "web")]
+fn input_linebreak_caret(e: &FormEvent) -> Option<(String, usize)> {
+    use dioxus::web::WebEventExt;
+    use wasm_bindgen::JsCast;
+    let we: web_sys::Event = e.data().try_as_web_event()?;
+    let ta = we
+        .target()?
+        .dyn_into::<web_sys::HtmlTextAreaElement>()
+        .ok()?;
+    if let Some(ie) = we.dyn_ref::<web_sys::InputEvent>() {
+        let t = ie.input_type();
+        let is_break = t == "insertLineBreak"
+            || t == "insertParagraph"
+            || (t == "insertText" && ie.data().as_deref() == Some("\n"));
+        if !is_break {
+            return None;
+        }
+    }
+    let value = ta.value();
+    let caret16 = ta.selection_start().ok().flatten()? as usize;
+    let byte = utf16_to_byte(&value, caret16);
+    Some((value, byte))
+}
+
 /// Read `(value, caret_byte_offset)` from the textarea that fired key event `e`.
 #[cfg(feature = "web")]
 fn textarea_caret(e: &KeyboardEvent) -> Option<(String, usize)> {
@@ -721,6 +751,52 @@ pub fn BlockEditor(
         active.set(Some(i + 1));
     };
 
+    // Touch counterpart to `handle_enter`. Soft keyboards (iOS/Android IMEs) don't
+    // deliver Enter as a `Key::Enter` keydown — it arrives through `oninput` as an
+    // `insertLineBreak`, so the keydown path above never sees it. Here we run the
+    // same double-Enter split from the input event: when the just-inserted newline
+    // completes a blank line (the text up to the caret ends in `\n\n`), end this
+    // block and open a fresh one below. Returns whether it split (so `oninput`
+    // can skip its normal commit).
+    #[cfg(feature = "web")]
+    let mut handle_input_split = move |i: usize, e: &FormEvent| -> bool {
+        let Some((value, caret)) = input_linebreak_caret(e) else {
+            return false;
+        };
+        // Trigger only on the second consecutive newline (blank line), matching
+        // the keydown path; a single Enter stays a soft newline within the block.
+        if caret < 2 || !value[..caret].ends_with("\n\n") {
+            return false;
+        }
+        // Drop the newline the second Enter just inserted from the head; the rest
+        // (minus one leading newline) becomes the new block — same shape as
+        // `handle_enter`'s head/tail split.
+        let mut head = value[..caret - 1].to_string();
+        ensure_paragraph_break(&mut head);
+        let rest = &value[caret..];
+        let tail = rest.strip_prefix('\n').unwrap_or(rest).to_string();
+        {
+            let mut f = frozen.write();
+            if i >= f.len() {
+                return false;
+            }
+            f[i].text = head;
+            f.insert(
+                i + 1,
+                Block {
+                    text: tail,
+                    atomic: false,
+                    frontmatter: false,
+                },
+            );
+        }
+        body.set(join_blocks(&frozen.read()));
+        moving.set(true);
+        pending_caret.set(Some(0));
+        active.set(Some(i + 1));
+        true
+    };
+
     // Cross-block arrow nav: Up/Left off the top/start of a block move into the
     // previous one, Down/Right off the bottom/end into the next — preserving the
     // caret column. Mid-block, the browser's default applies.
@@ -988,6 +1064,13 @@ pub fn BlockEditor(
                                 });
                             },
                             oninput: move |e: FormEvent| {
+                                // Touch keyboards deliver a double-Enter block split
+                                // through here, not via a keydown (K1). If it splits,
+                                // it owns the commit; otherwise fall through.
+                                #[cfg(feature = "web")]
+                                if handle_input_split(i, &e) {
+                                    return;
+                                }
                                 commit_block(i, e.value());
                                 ac.on_input(&e);
                             },
